@@ -7,7 +7,6 @@ citations can point at a page number.
 from __future__ import annotations
 
 import re
-from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -72,20 +71,6 @@ def _load_text(path: Path) -> LoadResult:
     return LoadResult([Document(text, meta)] if text else [], [] if text else [f"{path.name}: empty file"])
 
 
-def _strip_repeated_lines(pages: list[str]) -> list[str]:
-    """Remove running headers/footers: short lines that appear (digits ignored, so
-    "Page 3" == "Page 4") on at least half of the pages. Only for 3+ page PDFs."""
-    if len(pages) < 3:
-        return pages
-
-    def key(line: str) -> str:
-        return re.sub(r"\d+", "#", line.strip().lower())
-
-    counts = Counter(k for page in pages for k in {key(l) for l in page.splitlines() if 0 < len(l.strip()) <= 80})
-    repeated = {k for k, n in counts.items() if n >= len(pages) / 2}
-    return ["\n".join(l for l in page.splitlines() if key(l) not in repeated) for page in pages]
-
-
 def _load_pdf(path: Path) -> LoadResult:
     from pypdf import PdfReader  # imported lazily: only needed for PDFs
 
@@ -99,7 +84,7 @@ def _load_pdf(path: Path) -> LoadResult:
     except Exception as e:  # corrupt / unsupported PDF must not stop the whole ingest
         return LoadResult([], [f"{path.name}: could not read PDF ({type(e).__name__}: {e})"])
 
-    pages = _strip_repeated_lines([_tidy(re.sub(r"[ \t]+", " ", p)) for p in raw_pages])
+    pages = [_tidy(re.sub(r"[ \t]+", " ", p)) for p in raw_pages]
     docs: list[Document] = []
     for number, text in enumerate(pages, start=1):
         text = text.strip()
