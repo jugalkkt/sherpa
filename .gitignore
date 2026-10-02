@@ -1,2 +1,6 @@
 venv/
 .env
+CLAUDE.md
+data/
+__pycache__/
+*.pyc
