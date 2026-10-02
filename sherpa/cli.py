@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+from pathlib import Path
 
 import typer
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -98,3 +99,94 @@ def doctor(
 
     if not all(c.ok for c in checks):
         raise typer.Exit(1)
+
+
+@app.command()
+def ingest(
+    paths: list[Path] = typer.Argument(None, help="Files or folders to ingest (default: NOTES_DIR)."),
+    reset: bool = typer.Option(False, "--reset", help="Delete the index and re-embed everything."),
+    prune: bool = typer.Option(False, "--prune", help="Remove chunks of files that no longer exist."),
+) -> None:
+    """Load, chunk and embed your notes (.md, .txt, .pdf) into the local vector index."""
+    from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn
+
+    from sherpa.ingest.index import EmbeddingModelMismatch
+    from sherpa.ingest.pipeline import run_ingest
+    from sherpa.llm import LLMAuthError, LLMUnavailableError
+
+    s = _load_settings()
+    paths = paths or [s.notes_dir]
+    missing = [p for p in paths if not p.exists()]
+    if missing:
+        console.print(f"[red]Not found:[/red] {', '.join(map(str, missing))}")
+        raise typer.Exit(1)
+
+    with Progress(
+        TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(), TimeElapsedColumn(), console=console
+    ) as progress:
+        task = None
+
+        def on_file(source: str, n_chunks: int) -> None:
+            nonlocal task
+            if task is not None:
+                progress.remove_task(task)
+            task = progress.add_task(f"Embedding {source}", total=n_chunks)
+
+        def on_progress(n: int) -> None:
+            progress.advance(task, n)
+
+        try:
+            report = run_ingest(paths, reset=reset, prune=prune, on_file=on_file, on_progress=on_progress)
+        except (EmbeddingModelMismatch, LLMUnavailableError, LLMAuthError) as e:
+            progress.stop()
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(1)
+
+    table = Table(title="Ingest summary", show_header=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("files scanned", str(report.scanned))
+    table.add_row("new", ", ".join(report.new) or "-")
+    table.add_row("changed", ", ".join(report.changed) or "-")
+    table.add_row("unchanged (skipped)", str(len(report.unchanged)))
+    if report.pruned:
+        table.add_row("pruned", ", ".join(report.pruned))
+    if report.failed:
+        table.add_row("[red]no text extracted[/red]", ", ".join(report.failed))
+    table.add_row("chunks added / removed", f"{report.chunks_added} / {report.chunks_removed}")
+    console.print(table)
+    for w in report.warnings:
+        console.print(f"[yellow]warning:[/yellow] {w}")
+    if report.new or report.changed:
+        console.print(f"{len(report.new) + len(report.changed)} file(s) changed")
+    else:
+        console.print("0 changed")
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(..., help="What to search for in your notes."),
+    k: int = typer.Option(None, "-k", help="Number of results (default: RETRIEVAL_TOP_K)."),
+) -> None:
+    """Debug retrieval: show the note chunks most similar to QUERY."""
+    from sherpa.ingest.index import EmbeddingModelMismatch, NotesIndex
+    from sherpa.llm import LLMAuthError, LLMUnavailableError
+
+    s = _load_settings()
+    try:
+        hits = NotesIndex(s).query(query, k)
+    except (EmbeddingModelMismatch, LLMUnavailableError, LLMAuthError) as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    if not hits:
+        console.print("Index is empty. Run `python -m sherpa ingest` first.")
+        raise typer.Exit(1)
+
+    for rank, h in enumerate(hits, start=1):
+        weak = h.similarity < s.retrieval_min_similarity
+        colour = "dim" if weak else "green"
+        label = " (below RETRIEVAL_MIN_SIMILARITY)" if weak else ""
+        console.rule(f"[{colour}]#{rank}  sim {h.similarity:.2f}{label}[/{colour}]  {h.location}", align="left")
+        preview = h.text if len(h.text) <= 400 else h.text[:400] + " …"
+        console.print(preview, markup=False, highlight=False)

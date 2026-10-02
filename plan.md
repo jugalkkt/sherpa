@@ -120,7 +120,8 @@ sherpa/
     │   ├── __init__.py
     │   ├── loaders.py            # md/txt/pdf → Documents with metadata
     │   ├── chunking.py           # markdown-aware + recursive splitting
-    │   └── index.py              # Chroma collection mgmt, upsert, delete, query
+    │   ├── index.py              # Chroma collection mgmt, upsert, delete, query
+    │   └── pipeline.py           # run_ingest(): manifest-driven idempotent ingest, list_titles()
     ├── structured.py             # invoke_structured(): schema call + validation retry
     └── cli.py                    # typer app: doctor, ingest, search, start, resume, sessions
 ```
@@ -202,7 +203,7 @@ MAX_PLAN_REVISIONS=5            # soft cap: CLI warns, then forces approve-or-qu
 # --- explainer ---
 EXPLAINER_MAX_TOOL_ROUNDS=5
 RETRIEVAL_TOP_K=4
-RETRIEVAL_MIN_SIMILARITY=0.35   # cosine similarity; below this a hit is "weak"
+RETRIEVAL_MIN_SIMILARITY=0.65   # cosine similarity; below this a hit is "weak" (tuned for nomic-embed-text, see §6.6)
 FETCH_MAX_CHARS=6000
 WEB_MAX_RESULTS=5
 
@@ -482,19 +483,19 @@ Helpers: `current_topic(state) -> Topic`, `next_open_topic_idx(curriculum) -> in
 | `.pdf` | `pypdf.PdfReader`, one Document per page | `source`, `title` (PDF metadata title or filename), `page` (1-based), `kind="pdf"` |
 
 - Skip pages with no text and warn: *"page N has no extractable text, possibly scanned"*. OCR is out of scope.
-- Normalize whitespace and remove repeated header/footer lines (a line appearing on ≥ 50% of pages).
+- Normalize whitespace only. Repeated header/footer lines are deliberately **not** stripped, so no page text is ever dropped.
 - If PDF extraction quality is poor, swap `pypdf` → `pymupdf` (better layout handling; AGPL license).
 
 ### 6.2 Chunking (`ingest/chunking.py`)
 
-- **Markdown:** `MarkdownHeaderTextSplitter` on `#`, `##`, `###`, so the heading path goes into metadata (`section="Intro > Gradient descent"`). Then `RecursiveCharacterTextSplitter`.
+- **Markdown:** a small custom heading splitter on `#`, `##`, `###` (ignores headings inside code fences, folds heading-only sections into the next), so the heading path goes into metadata (`section="Intro > Gradient descent"`) and is prepended to the chunk text. Then `RecursiveCharacterTextSplitter`. (`MarkdownHeaderTextSplitter` was not used: it rewrites line breaks as `"  \n"`, mangling indented formula/code blocks.)
 - **Text/PDF:** `RecursiveCharacterTextSplitter` directly.
 - Parameters: `chunk_size=1200` chars, `chunk_overlap=150`. That's roughly 300 tokens, so 4 hits stay at about 1.2K tokens of context.
 - Chunk id = `sha1(f"{source}|{page}|{chunk_index}|{text}")[:16]`.
 
 ### 6.3 Index (`ingest/index.py`)
 
-- `chromadb.PersistentClient(path=DATA_DIR/"chroma")`, collection `notes`, `metadata={"hnsw:space": "cosine", "embed_model": EMBED_MODEL}`.
+- `chromadb.PersistentClient(path=DATA_DIR/"chroma")`, collection `notes`, `embedding_function=None`, `configuration={"hnsw": {"space": "cosine"}}` (Chroma 1.x API; the old `metadata={"hnsw:space": ...}` form is deprecated), `metadata={"embed_model": EMBED_MODEL}`.
 - **Guard:** if the collection's `embed_model` ≠ the current `EMBED_MODEL`, refuse to query and tell the user to run `ingest --reset`.
 - **nomic-embed-text task prefixes:** documents are embedded as `"search_document: " + text` and queries as `"search_query: " + text`. Without the prefixes, retrieval quality drops noticeably.
 - Batch embedding: 32 chunks per `/api/embed` call, with a `rich` progress bar.
@@ -503,7 +504,7 @@ Helpers: `current_topic(state) -> Topic`, `next_open_topic_idx(curriculum) -> in
   - changed file → delete its old chunk ids, then add the new ones
   - file removed from disk → delete its chunks (only with `--prune`)
 - `query(text, k) -> list[Hit]`, where `Hit = {id, text, source, title, page?, section?, similarity}` and `similarity = 1 - cosine_distance`.
-- `list_titles() -> list[str]`: distinct document titles, which feed the planner.
+- `list_titles() -> list[str]` (in `pipeline.py`, read from the manifest): distinct document titles, which feed the planner.
 
 ### 6.4 CLI
 
@@ -517,6 +518,18 @@ python -m sherpa search "query" [-k 4]                    # debug: shows hits + 
 - Ingesting a folder with 2 Markdown files and 1 PDF reports the file, chunk and skip counts.
 - Re-running ingest immediately reports "0 changed".
 - `search "<phrase from a PDF page>"` returns that page in the top 3 with similarity ≥ 0.5.
+
+### 6.6 Threshold calibration (measured on the sample notes)
+
+nomic-embed-text compresses cosine similarity into a narrow band, so the original 0.35 threshold never fired:
+
+| Query set | Top-1 similarity |
+|---|---|
+| 10 on-topic queries | 0.663 – 0.825 |
+| 8 off-topic queries (CNNs, SQL, photosynthesis, k-means...) | 0.490 – 0.650 |
+| Near-topic ("polynomial regression") | 0.723 |
+
+`RETRIEVAL_MIN_SIMILARITY` is therefore **0.65**. Re-calibrate with `python -m sherpa search` if the embedding model or the notes change a lot. The explainer must not trust the threshold blindly: near-topic queries can pass it.
 
 ---
 

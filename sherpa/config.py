@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     # --- explainer ---
     explainer_max_tool_rounds: int = 5
     retrieval_top_k: int = 4
-    retrieval_min_similarity: float = 0.35
+    retrieval_min_similarity: float = 0.65  # tuned for nomic-embed-text (see .env.example)
     fetch_max_chars: int = 6000
     web_max_results: int = 5
 
@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     @property
     def chroma_dir(self) -> Path:
         return self.data_dir / "chroma"
+
+    @property
+    def manifest_path(self) -> Path:
+        return self.data_dir / "ingest_manifest.json"
 
     @property
     def checkpoints_path(self) -> Path:
