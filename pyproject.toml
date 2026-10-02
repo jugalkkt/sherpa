@@ -1,0 +1,19 @@
+[project]
+name = "sherpa"
+version = "0.1.0"
+description = "Multi-agent study companion (LangGraph + MCP + A2A + Ollama)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-m 'not eval'"
+markers = [
+    "unit: fast tests that never call an LLM",
+    "eval: LLM-quality evals that need a running Ollama",
+]
+
+[tool.pyright]
+pythonPath = "src"

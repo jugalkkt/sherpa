@@ -1,7 +1,11 @@
 venv/
+.venv/
 .env
 CLAUDE.md
 data/
+notes/
 __pycache__/
 *.pyc
-notes/
+.pytest_cache/
+*.egg-info/
+.deepeval/
