@@ -1,0 +1,11 @@
+# Only what the web app imports. Same pins as the root requirements.txt.
+langgraph==1.1.0
+langgraph-checkpoint-sqlite==3.0.3
+langchain-core==1.2.10
+langchain-ollama==1.0.0
+mcp==1.26.0
+httpx==0.28.1
+pydantic==2.11.9
+python-dotenv==1.1.1
+streamlit==1.43.2
+kaggle==2.2.4
