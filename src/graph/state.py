@@ -85,6 +85,7 @@ class QuizQuestion:
     correct: bool = False
     feedback: str = ""
     score: float = 0.0
+    disputed: bool = False  # the learner says the question or its grade is wrong: it doesn't count
 
     def to_dict(self) -> dict:
         return asdict(self)
