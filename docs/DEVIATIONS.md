@@ -297,3 +297,29 @@ Live check, 3 generations × 3 questions: all 9 questions self-contained.
 Known 7B limitation, not fixed: some *expected answers* are partly wrong
 (e.g. "use nonlocal" for a module-level variable; wrong reasoning on why
 `add_item(1, [])` prints `[1]`). The grader compares against these.
+
+## Post-Phase 8 fix: grader gave 50% to an answer that stated the opposite
+
+Live session: the answer "new_list creates a duplicate ... 2 different lists"
+(for `new_list = my_list`, where both names share one list) scored 50% with
+feedback saying it was incorrect. Re-grading it 5 times gave 0.50 every time.
+The score-band prompt (overlapping bands, "encouraging grader", free-form
+number) made `qwen2.5:7b` hedge at the boundary where two bands met.
+
+- Verdict-first prompt: the model picks one of correct / minor_gaps /
+  partial / wrong, with an explicit rule that stating the opposite of the key
+  fact is "wrong". "Encouraging" removed; kindness belongs in the feedback.
+- Ollama structured output (`GRADE_SCHEMA`) restricts `verdict` to those four.
+- `correct` is derived in code (`verdict in {correct, minor_gaps}`) and the
+  score is clamped into the verdict's range (`VERDICT_RANGES`), so the model
+  can no longer contradict itself (e.g. `correct: true` with a wrong verdict).
+  A "partial" answer is therefore shown with ✗ even at 0.5–0.7; it still
+  counts toward the topic's pass score, which uses the numeric average.
+- Unknown verdicts, missing fields and the old output format fall back to the
+  neutral 0.5 result, as before.
+
+Live results (qwen2.5:7b, 3 runs each, stable): wrong answer 0.00, correct
+0.85, partial 0.50, empty 0.00. Grading evals: correct 0.85, wrong 0.00,
+partial 0.50, all pass with more margin than before (wrong 0.30 vs limit 0.35,
+partial 0.70 vs limit 0.75).
+Cosmetic, not fixed: some feedback refers to "the student" instead of "you".
