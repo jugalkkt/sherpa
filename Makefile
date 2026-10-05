@@ -4,7 +4,7 @@ GOAL   ?= Learn Python closures and decorators from scratch
 LOGS   := data/logs
 
 .PHONY: setup run streamlit run-goal resume services stop langfuse langfuse-stop \
-        test eval test-all clean help
+        server-secrets server-start server-status test eval test-all clean help
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | \
@@ -28,6 +28,15 @@ resume:  ## Resume a session: make resume ID=<session_id>
 
 streamlit:  ## Launch the Streamlit UI
 	$(PYTHON) -m streamlit run streamlit_app.py
+
+server-secrets:  ## Upload ngrok + basic-auth secrets to the private Kaggle dataset
+	PYTHONPATH=src $(PYTHON) -m hosting.kaggle_server upload-secrets
+
+server-start:  ## Start the Kaggle model server (stops itself when idle)
+	PYTHONPATH=src $(PYTHON) -m hosting.kaggle_server start
+
+server-status:  ## Show the Kaggle model server's state
+	PYTHONPATH=src $(PYTHON) -m hosting.kaggle_server status
 
 services:  ## Start both A2A services in the background (logs in data/logs)
 	mkdir -p $(LOGS)
