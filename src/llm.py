@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import os
+import time
 
 import httpx
 from langchain_ollama import ChatOllama
@@ -81,3 +82,18 @@ def describe_llm_error(exc: Exception) -> str:
     if isinstance(exc, httpx.TimeoutException):
         return f"Ollama at {base_url()} timed out after {REQUEST_TIMEOUT:.0f}s."
     return f"LLM call failed: {type(exc).__name__}: {text[:200]}"
+
+
+def invoke_with_retry(llm, messages, retries: int = 1, delay: float = 1.0):
+    """llm.invoke, retried on a dropped connection (tunnels glitch).
+
+    Timeouts and HTTP errors are NOT retried: a timeout already waited minutes,
+    and an HTTP error (401, a missing model) won't fix itself.
+    """
+    for attempt in range(retries + 1):
+        try:
+            return llm.invoke(messages)
+        except httpx.TransportError as exc:
+            if isinstance(exc, httpx.TimeoutException) or attempt == retries:
+                raise
+            time.sleep(delay)
