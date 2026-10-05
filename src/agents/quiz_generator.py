@@ -87,24 +87,43 @@ def _split_code(question: str, code: str) -> tuple[str, str]:
     return question.rstrip(":").strip() if blocks else question, code
 
 GRADING_PROMPT = """\
-You are a fair, encouraging grader. Compare the student's answer with the
-expected answer. Judge the meaning, not the wording: different words or a
-different valid example are fine.
+You are a fair grader. Compare the student's answer with the expected answer.
+Judge the meaning, not the wording.
 
-Score bands:
-- 0.9-1.0: correct and complete
-- 0.7-0.9: correct with minor gaps
-- 0.5-0.7: right idea but imprecise
-- 0.3-0.5: partially correct, a key part missing
-- 0.0-0.2: wrong, off-topic, or no answer
+First decide the verdict, then pick a score inside that verdict's range:
+- "correct":    right and complete (score 0.85-1.0)
+- "minor_gaps": right, missing a detail (0.7-0.85)
+- "partial":    right idea, a key part missing or vague (0.4-0.7)
+- "wrong":      contradicts the expected answer, misunderstands it, or is off-topic (0.0-0.2)
 
-"correct" is true when the score is 0.5 or more. "feedback" is 1-2
-sentences addressed to the student. "missing_concept" names the most
+An answer that states the OPPOSITE of the key fact is "wrong", even if it uses
+the right vocabulary. Do not give credit for effort.
+
+"feedback": 1-2 sentences to the student. "missing_concept": the most
 important missing idea in a few words, or "" if nothing is missing.
-
-Respond with a single JSON object and nothing else:
-{"correct": true, "score": 0.8, "feedback": "...", "missing_concept": "..."}
 """
+
+# verdict -> allowed score range. The model picks the verdict (the easy part);
+# the score is clamped into its range so the two can never disagree.
+VERDICT_RANGES = {
+    "correct": (0.85, 1.0),
+    "minor_gaps": (0.7, 0.85),
+    "partial": (0.4, 0.7),
+    "wrong": (0.0, 0.2),
+}
+PASSING_VERDICTS = {"correct", "minor_gaps"}
+
+# Ollama structured output: "verdict" can only be one of the four words.
+GRADE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": list(VERDICT_RANGES)},
+        "score": {"type": "number"},
+        "feedback": {"type": "string"},
+        "missing_concept": {"type": "string"},
+    },
+    "required": ["verdict", "score", "feedback", "missing_concept"],
+}
 
 
 def _fallback_questions(topic: str) -> list[dict]:
@@ -165,16 +184,13 @@ def generate_questions(topic: str, explanation: str, n: int = 3) -> list[dict]:
     return questions[:n]
 
 
-def _to_bool(value) -> bool:
-    # bool("false") is True, so strings need parsing.
-    if isinstance(value, str):
-        return value.strip().lower() in {"true", "yes", "1"}
-    return bool(value)
-
-
 def grade_answer(question: str, expected: str, student_answer: str) -> dict:
-    """LLM-as-judge for one answer. Returns {correct, score, feedback, missing_concept}."""
-    llm = build_llm(temperature=0.1, json_mode=True)
+    """LLM-as-judge for one answer. Returns {correct, score, feedback, missing_concept}.
+
+    The model gives a verdict; `correct` and the score range come from the
+    verdict in code, not from the model's own (possibly contradicting) fields.
+    """
+    llm = build_llm(temperature=0.1, json_schema=GRADE_SCHEMA)
     try:
         response = llm.invoke([
             SystemMessage(content=GRADING_PROMPT),
@@ -185,9 +201,11 @@ def grade_answer(question: str, expected: str, student_answer: str) -> dict:
             )),
         ])
         data = json.loads(response.content)
-        score = min(1.0, max(0.0, float(data.get("score", 0.0))))
+        verdict = str(data["verdict"]).strip().lower()
+        low, high = VERDICT_RANGES[verdict]  # KeyError on an unknown verdict
+        score = min(high, max(low, float(data["score"])))
         return {
-            "correct": _to_bool(data.get("correct", score >= 0.5)),
+            "correct": verdict in PASSING_VERDICTS,
             "score": score,
             "feedback": str(data.get("feedback", "")).strip(),
             "missing_concept": str(data.get("missing_concept") or "").strip(),
