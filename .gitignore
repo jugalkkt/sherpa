@@ -4,7 +4,8 @@ venv/
 CLAUDE.md
 data/
 notes/
-__pycache__/
+__pyca
+che__/
 *.pyc
 .pytest_cache/
 *.egg-info/
