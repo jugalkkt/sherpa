@@ -19,3 +19,12 @@ make help           # every target
 
 Your notes live in `study_materials/sample_notes/` (set `NOTES_PATH` in `.env`
 to use another folder).
+
+## Web app and hosting
+
+```bash
+make streamlit      # the web UI locally
+```
+
+To host it for free (Streamlit Community Cloud, with a Kaggle GPU you start
+from the app that stops itself when idle), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
