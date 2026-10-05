@@ -10,3 +10,4 @@ che__/
 .pytest_cache/
 *.egg-info/
 .deepeval/
+.streamlit/secrets.toml
