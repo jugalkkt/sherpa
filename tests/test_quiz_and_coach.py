@@ -162,33 +162,80 @@ def test_generate_falls_back_when_llm_unreachable():
 
 # --- grade_answer -------------------------------------------------------------------
 
+def verdict(v, score, feedback="", missing=""):
+    return {"verdict": v, "score": score, "feedback": feedback, "missing_concept": missing}
+
+
 def test_grade_parses_response(llm_returns):
-    llm = llm_returns(quiz, {"correct": True, "score": 0.8, "feedback": "Good.", "missing_concept": ""})
+    llm = llm_returns(quiz, verdict("minor_gaps", 0.8, "Good.", "edge case"))
     g = grade_answer("Why?", "Because.", "Because of scope.")
-    assert g == {"correct": True, "score": 0.8, "feedback": "Good.", "missing_concept": ""}
-    assert "Student answer: Because of scope." in llm.seen[0][1].content
+    assert g == {"correct": True, "score": 0.8, "feedback": "Good.", "missing_concept": "edge case"}
+    system, human = llm.seen[0]
+    assert "First decide the verdict" in system.content
+    assert "Student answer: Because of scope." in human.content
 
 
-@pytest.mark.parametrize("raw_score, expected", [(1.7, 1.0), (-0.3, 0.0), ("0.6", 0.6)])
-def test_grade_clamps_score(llm_returns, raw_score, expected):
-    llm_returns(quiz, {"correct": True, "score": raw_score, "feedback": "", "missing_concept": ""})
-    assert grade_answer("q", "e", "a")["score"] == expected
+def test_grading_uses_structured_output(monkeypatch):
+    seen = {}
+
+    def fake_build(**kwargs):
+        seen.update(kwargs)
+        return FakeLLM(verdict("wrong", 0.0))
+    monkeypatch.setattr(quiz, "build_llm", fake_build)
+    grade_answer("q", "e", "a")
+    assert seen["json_schema"] is quiz.GRADE_SCHEMA and seen["temperature"] == 0.1
+    assert seen["json_schema"]["properties"]["verdict"]["enum"] == ["correct", "minor_gaps", "partial", "wrong"]
 
 
-@pytest.mark.parametrize("raw, expected", [("false", False), ("True", True), (0, False), (1, True)])
-def test_grade_coerces_correct_to_bool(llm_returns, raw, expected):
-    llm_returns(quiz, {"correct": raw, "score": 0.5, "feedback": "", "missing_concept": None})
+@pytest.mark.parametrize("v, expected_correct", [
+    ("correct", True), ("minor_gaps", True), ("partial", False), ("wrong", False)])
+def test_correct_comes_from_the_verdict(llm_returns, v, expected_correct):
+    low, high = quiz.VERDICT_RANGES[v]
+    llm_returns(quiz, verdict(v, (low + high) / 2))
+    assert grade_answer("q", "e", "a")["correct"] is expected_correct
+
+
+def test_model_cannot_contradict_itself(llm_returns):
+    """The seen-live failure shape: a wrong answer with a middling score and correct=True."""
+    llm_returns(quiz, {"verdict": "wrong", "score": 0.6, "correct": True, "feedback": "", "missing_concept": ""})
     g = grade_answer("q", "e", "a")
-    assert g["correct"] is expected and g["missing_concept"] == ""
+    assert g["correct"] is False and g["score"] == 0.2  # clamped into the "wrong" range
 
 
-@pytest.mark.parametrize("content", ["oops", {"score": "high"}])
+@pytest.mark.parametrize("v, raw, expected", [
+    ("wrong", 0.5, 0.2), ("wrong", -1, 0.0),
+    ("partial", 0.1, 0.4), ("partial", 0.9, 0.7), ("partial", 0.5, 0.5),
+    ("correct", 0.3, 0.85), ("correct", 1.7, 1.0), ("correct", "0.95", 0.95),
+    ("minor_gaps", 0.99, 0.85),
+])
+def test_score_is_clamped_into_the_verdict_range(llm_returns, v, raw, expected):
+    llm_returns(quiz, verdict(v, raw))
+    assert grade_answer("q", "e", "a")["score"] == pytest.approx(expected)
+
+
+def test_verdict_is_case_and_space_insensitive_and_nulls_become_empty(llm_returns):
+    llm_returns(quiz, {"verdict": " Wrong ", "score": 0.1, "feedback": "No.", "missing_concept": None})
+    g = grade_answer("q", "e", "a")
+    assert g["correct"] is False and g["missing_concept"] == ""
+
+
+@pytest.mark.parametrize("content", [
+    "oops",                                                                  # not JSON
+    {"score": 0.9, "feedback": "", "missing_concept": ""},                   # no verdict
+    {"verdict": "great", "score": 0.9, "feedback": "", "missing_concept": ""},  # unknown verdict
+    {"verdict": "correct", "score": "high", "feedback": "", "missing_concept": ""},
+    {"correct": True, "score": 0.9, "feedback": "", "missing_concept": ""},  # the old format
+])
 def test_grade_fallback(llm_returns, content):
     llm_returns(quiz, content)
     g = grade_answer("q", "e", "a")
     assert g["correct"] is False and g["score"] == 0.5
     assert g["feedback"].startswith("Could not grade automatically")
     assert g["missing_concept"] == ""
+
+
+def test_grade_falls_back_when_llm_unreachable():
+    assert grade_answer("q", "e", "a")["score"] == 0.5
 
 
 # --- run_quiz -----------------------------------------------------------------------
