@@ -4,7 +4,7 @@ import httpx
 import pytest
 from ollama import ResponseError
 
-from llm import auth_headers, build_llm, describe_llm_error
+from llm import auth_headers, build_llm, describe_llm_error, invoke_with_retry
 
 pytestmark = pytest.mark.unit
 
@@ -99,3 +99,52 @@ def test_error_timeout():
 
 def test_error_fallback():
     assert describe_llm_error(RuntimeError("boom")) == "LLM call failed: RuntimeError: boom"
+
+
+# --- invoke_with_retry -----------------------------------------------------------------------------------------
+
+class Scripted:
+    def __init__(self, *outcomes):
+        self.outcomes, self.calls = list(outcomes), 0
+
+    def invoke(self, messages):
+        self.calls += 1
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("llm.time.sleep", sleeps.append)
+    return sleeps
+
+
+def test_retry_recovers_from_a_dropped_connection(no_sleep):
+    llm = Scripted(httpx.RemoteProtocolError("disconnected"), "ok")
+    assert invoke_with_retry(llm, []) == "ok" and llm.calls == 2 and no_sleep == [1.0]
+
+
+def test_retry_gives_up_after_the_allowed_retries(no_sleep):
+    llm = Scripted(httpx.ReadError("a"), httpx.ReadError("b"), "never")
+    with pytest.raises(httpx.ReadError, match="b"):
+        invoke_with_retry(llm, [])
+    assert llm.calls == 2
+
+
+@pytest.mark.parametrize("error", [
+    httpx.ReadTimeout("slow"),             # already waited minutes
+    ResponseError("Unauthorized", 401),    # won't fix itself
+    ValueError("bad"),
+])
+def test_retry_does_not_retry_timeouts_or_other_errors(no_sleep, error):
+    llm = Scripted(error, "never")
+    with pytest.raises(type(error)):
+        invoke_with_retry(llm, [])
+    assert llm.calls == 1 and no_sleep == []
+
+
+def test_retry_success_first_time_does_not_sleep(no_sleep):
+    assert invoke_with_retry(Scripted("fine"), []) == "fine" and no_sleep == []

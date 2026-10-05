@@ -190,18 +190,36 @@ class TestQuizGeneratorQuality:
             assert q["question"].strip() and q["expected_answer"].strip()
             assert q["difficulty"] in {"easy", "medium", "hard"}
 
+    def test_code_questions_are_verified_by_really_running_the_code(self, quiz_questions):
+        """No judge involved: the stored answer must equal what the code actually does."""
+        from code_runner import run_snippet
+
+        for q in quiz_questions:
+            if not q["code"]:
+                continue
+            real = run_snippet(q["code"])
+            assert real.ran, f"unrunnable code was kept: {q['code']}"
+            assert q["verified"] == real.describe()
+            assert q["expected_answer"] == f"Verified output (from running the code):\n{real.describe()}"
+            assert "#" not in q["code"], "comments can leak the answer"
+            assert q["question"] in {"What does this code print?", "What error does this code raise?",
+                                     "What does this code print, and what error does it then raise?"}
+
     def test_questions_test_understanding_not_recall(self, judge, quiz_questions):
         metric = GEval(
             name="Tests understanding",
             criteria=(
-                "The questions in the actual output must test UNDERSTANDING of the topic in the input: "
-                "applying it, explaining why, edge cases or comparisons, not recalling a definition. "
-                "At least one question should be about a common mistake. Yes/no questions score low."
+                "The actual output is a quiz about the topic in the input. Judge whether it tests UNDERSTANDING "
+                "rather than recall of a definition. Predicting what a piece of code prints or which error it "
+                "raises is an application question, so 'What does this code print?' is acceptable on its own: "
+                "judge the code itself. Give a high score when the code exercises the topic and is non-trivial, "
+                "and especially when at least one question probes a common mistake or an edge case. Give a low "
+                "score for code unrelated to the topic, trivial code, or questions that only ask for a definition."
             ),
             evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
             model=judge, threshold=THRESHOLD, async_mode=False,
         )
-        case = LLMTestCase(input="Python closures (nonlocal, late binding, __closure__)",
+        case = LLMTestCase(input="Quiz topic: Python closures (nonlocal, late binding, __closure__)",
                            actual_output="\n\n".join(full_question(q) for q in quiz_questions))
         assert measure(metric, case) >= THRESHOLD
 

@@ -1,6 +1,7 @@
 import copy
 import json
 
+import httpx
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -43,14 +44,22 @@ def llm_returns(monkeypatch):
     return install
 
 
-
-
 def result(score, weak=(), topic="Closures Explained"):
     return QuizResult(topic=topic, questions=[QuizQuestion("q", "a", score=score)],
                       score=score, weak_areas=list(weak), timestamp="2026-10-04T10:00:00+00:00")
 
 
 # --- generate_questions -------------------------------------------------------------
+
+def test_the_prompt_asks_for_both_kinds_of_question():
+    assert "Include at least one of each" in GENERATION_PROMPT.format(n=3)
+
+
+def test_code_questions_ask_only_for_the_output():
+    prompt = GENERATION_PROMPT.format(n=3)
+    assert "Ask ONLY for the output or the error, never for an explanation" in prompt
+    assert 'set "expected_answer" to ""' in prompt
+
 
 def test_generation_prompt_formats_with_literal_braces():
     prompt = GENERATION_PROMPT.format(n=4)
@@ -67,10 +76,12 @@ def test_generate_parses_caps_and_normalises(llm_returns):
     ]})
     qs = generate_questions("Closures", "explanation text", n=3)
     assert len(qs) == 3
-    assert qs[0] == {"question": "Why nonlocal?", "code": "", "expected_answer": "To rebind.", "difficulty": "hard"}
+    assert qs[0] == {"question": "Why nonlocal?", "code": "", "expected_answer": "To rebind.",
+                     "difficulty": "hard", "verified": ""}
     assert qs[1]["difficulty"] == "medium" and qs[2]["difficulty"] == "medium"
     system, human = llm.seen[0]
-    assert "exactly 3" in system.content and "explanation text" in human.content
+    assert f"exactly {3 + quiz.EXTRA_QUESTIONS}" in system.content  # over-generate: some get dropped
+    assert "explanation text" in human.content
     assert "CANNOT see the explanation" in system.content
 
 
@@ -90,9 +101,9 @@ def test_generation_uses_structured_output(monkeypatch):
 def test_code_is_kept_and_fences_stripped(llm_returns):
     llm_returns(quiz, {"questions": [{
         "question": "What does this print, and why?",
-        "code": "```python\ndef f():\n    x = 1\n```",
-        "expected_answer": "Nothing; f is never called.", "difficulty": "easy"}]})
-    assert generate_questions("Scope", "x")[0]["code"] == "def f():\n    x = 1"
+        "code": "```python\ndef f():\n    return 1\nprint(f())\n```",
+        "expected_answer": "1.", "difficulty": "easy"}]})
+    assert generate_questions("Scope", "x")[0]["code"] == "def f():\n    return 1\nprint(f())"
 
 
 @pytest.mark.parametrize("question", [
@@ -121,11 +132,12 @@ def test_same_reference_is_fine_when_code_is_attached(llm_returns):
 def test_code_pasted_in_question_and_code_field_is_shown_once(llm_returns):
     """Seen live: the model filled `code` AND pasted the same block into the question."""
     llm_returns(quiz, {"questions": [{
-        "question": "Explain why a and b match in the following code:\n```python\na = [1]\nb = a\n```",
-        "code": "a = [1]\nb = a", "expected_answer": "Same list.", "difficulty": "easy"}]})
+        "question": "Explain why a and b match in the following code:\n```python\na = [1]\nb = a\nprint(a is b)\n```",
+        "code": "a = [1]\nb = a\nprint(a is b)", "expected_answer": "Same list.", "difficulty": "easy"}]})
     q = generate_questions("Basics", "x")[0]
-    assert q["question"] == "Explain why a and b match in the following code"
-    assert q["code"] == "a = [1]\nb = a"
+    assert q["code"] == "a = [1]\nb = a\nprint(a is b)"
+    assert "```" not in q["question"] and "a = [1]" not in q["question"]  # the block is shown once, as code
+    assert q["verified"] == "True"
 
 
 def test_code_only_in_question_is_moved_to_code_field(llm_returns):
@@ -133,7 +145,136 @@ def test_code_only_in_question_is_moved_to_code_field(llm_returns):
         "question": "What does this print?\n```python\nprint(1 + 1)\n```",
         "code": "", "expected_answer": "2", "difficulty": "easy"}]})
     q = generate_questions("Basics", "x")[0]
-    assert (q["question"], q["code"]) == ("What does this print?", "print(1 + 1)")
+    assert q["code"] == "print(1 + 1)" and "```" not in q["question"]
+    assert q["verified"] == "2"
+
+
+# --- code questions are verified by running the code (fix A + B) ----------------------------------
+
+ADD_ITEM = ("def add_item(item, bucket=None):\n    if bucket is None:\n        bucket = []\n"
+            "    bucket.append(item)\n    return bucket\n")
+
+
+def code_q(code, expected="WRONG model guess", question="What does this print, and why?"):
+    return {"question": question, "code": code, "expected_answer": expected, "difficulty": "hard"}
+
+
+def test_expected_answer_comes_from_running_the_code_not_the_model(llm_returns):
+    """The live bug: the model said [5, 10, 15]; the code really prints [5], [10], [15]."""
+    code = ADD_ITEM + "print(add_item(5))\nprint(add_item(10))\nprint(add_item(15))"
+    llm_returns(quiz, {"questions": [code_q(code, expected="The output is [5, 10, 15].")]})
+    q = generate_questions("Basics", "x")[0]
+    assert q["verified"] == "[5]\n[10]\n[15]"
+    assert q["expected_answer"] == "Verified output (from running the code):\n[5]\n[10]\n[15]"
+    assert "[5, 10, 15]" not in q["expected_answer"]
+
+
+@pytest.mark.parametrize("model_wording", [
+    "What will the following code raise when run?",                  # but the code prints
+    "Why does the following code raise an UnboundLocalError?",       # leaks the answer
+    "How does Python resolve the name x? Explain.",                  # asks for an explanation
+])
+def test_question_text_is_written_from_what_the_code_really_does(llm_returns, model_wording):
+    llm_returns(quiz, {"questions": [code_q("print(1 + 1)", question=model_wording)]})
+    assert generate_questions("x", "x")[0]["question"] == "What does this code print?"
+
+
+@pytest.mark.parametrize("code, wording", [
+    ("print(1)", "What does this code print?"),
+    ("count = 0\ndef bump():\n    count += 1\nbump()", "What error does this code raise?"),
+    ("print('a')\nraise KeyError('k')", "What does this code print, and what error does it then raise?"),
+])
+def test_question_wording_follows_the_behaviour(llm_returns, code, wording):
+    llm_returns(quiz, {"questions": [code_q(code, question="Whatever the model wrote.")]})
+    assert generate_questions("x", "x")[0]["question"] == wording
+
+
+def test_concept_question_wording_is_left_alone(llm_returns):
+    llm_returns(quiz, {"questions": [{"question": "Why is LEGB ordered that way?", "code": "",
+                                      "expected_answer": "Inner scopes shadow outer ones.", "difficulty": "easy"}]})
+    assert generate_questions("x", "x")[0]["question"] == "Why is LEGB ordered that way?"
+
+
+def test_code_questions_need_no_expected_answer_from_the_model(llm_returns):
+    llm_returns(quiz, {"questions": [code_q("print(6 * 7)", expected="")]})
+    assert generate_questions("Math", "x")[0]["verified"] == "42"
+
+
+def test_concept_question_without_an_expected_answer_is_dropped(llm_returns):
+    llm_returns(quiz, {"questions": [{"question": "Why LEGB?", "code": "", "expected_answer": "", "difficulty": "easy"}]})
+    assert "own words" in generate_questions("Scope", "x")[0]["question"]
+
+
+def test_code_that_raises_is_described_as_raising(llm_returns):
+    llm_returns(quiz, {"questions": [code_q("count = 0\ndef bump():\n    count += 1\nbump()")]})
+    q = generate_questions("Scope", "x")[0]
+    assert q["verified"].startswith("Raises UnboundLocalError")
+
+
+def test_prints_then_raises(llm_returns):
+    llm_returns(quiz, {"questions": [code_q("print('a')\nraise ValueError('boom')")]})
+    assert generate_questions("x", "x")[0]["verified"] == "a\n...then raises ValueError: boom"
+
+
+def test_code_question_that_prints_nothing_is_dropped(llm_returns, capsys):
+    """Fix B: the live question had three bare calls and no print, so there was nothing to ask."""
+    llm_returns(quiz, {"questions": [
+        code_q(ADD_ITEM + "add_item(5)\nadd_item(10)"),
+        {"question": "Why use None as a default?", "code": "", "expected_answer": "B", "difficulty": "easy"},
+    ]})
+    qs = generate_questions("Basics", "x")
+    assert [q["question"] for q in qs] == ["Why use None as a default?"]
+    assert "prints nothing" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("code, why", [
+    ("import os\nprint(os.getcwd())", "imports os"),
+    ("print(open('/etc/passwd').read())", "uses open()"),
+    ("while True:\n    pass", "crashed"),
+    ("print(", "syntax error"),
+])
+def test_unrunnable_code_questions_are_dropped(llm_returns, capsys, code, why):
+    llm_returns(quiz, {"questions": [code_q(code)]})
+    qs = generate_questions("Basics", "x")
+    assert "own words" in qs[0]["question"]  # nothing left: the generic fallback
+    assert why in capsys.readouterr().out
+
+
+def test_no_model_explanation_is_added_to_verified_answers(monkeypatch):
+    """A 7B model explained subtle behaviour wrongly, and the grader followed it (seen live)."""
+    calls = []
+
+    def build(**kwargs):
+        calls.append(kwargs)
+        return FakeLLM({"questions": [code_q("print(2 ** 10)", expected="")]})
+    monkeypatch.setattr(quiz, "build_llm", build)
+    q = generate_questions("Math", "x", n=1)[0]
+    assert len(calls) == 1 and calls[0].get("json_schema")  # only the question-writing call
+    assert q["expected_answer"] == "Verified output (from running the code):\n1024"
+    assert "Why" not in q["expected_answer"]
+
+
+def test_stops_verifying_once_enough_questions_are_collected(llm_returns, monkeypatch):
+    llm_returns(quiz, {"questions": [code_q(f"print({i})") for i in range(5)]})
+    ran = []
+    real = quiz.run_snippet
+    monkeypatch.setattr(quiz, "run_snippet", lambda code: (ran.append(code), real(code))[1])
+    assert len(generate_questions("x", "x", n=3)) == 3
+    assert len(ran) == 3
+
+
+def test_concept_questions_are_not_run(llm_returns, monkeypatch):
+    llm_returns(quiz, {"questions": [{"question": "Why is LEGB ordered that way?", "code": "",
+                                      "expected_answer": "Inner scopes shadow outer ones.", "difficulty": "easy"}]})
+    monkeypatch.setattr(quiz, "run_snippet", lambda code: pytest.fail("no code, nothing to run"))
+    q = generate_questions("Scope", "x")[0]
+    assert q["expected_answer"] == "Inner scopes shadow outer ones." and q["verified"] == ""
+
+
+def test_grading_prompt_treats_verified_output_as_fact():
+    assert 'starts with "Verified output"' in quiz.GRADING_PROMPT
+    assert "actually running the code" in quiz.GRADING_PROMPT
+    assert "Ignore their explanation" in quiz.GRADING_PROMPT
 
 
 def test_all_questions_dropped_falls_back(llm_returns):
@@ -434,3 +575,175 @@ def test_study_buddy_failure_is_silent(sample_state, quiet_coach, monkeypatch):
     monkeypatch.setattr(coach, "try_study_buddy_assistance", boom)
     sample_state["quiz_results"] = [result(0.2, ["nonlocal"])]
     assert progress_coach_node(sample_state)["error"] is None
+
+
+# --- disputed questions don't count (fix C) -----------------------------------------------------------------
+
+def graded(score, disputed=False):
+    return QuizQuestion("q", "a", user_answer="x", score=score, disputed=disputed)
+
+
+def test_quiz_score_ignores_disputed_questions():
+    assert quiz.quiz_score([graded(1.0), graded(0.0), graded(0.5)]) == pytest.approx(0.5)
+    assert quiz.quiz_score([graded(1.0), graded(0.0, disputed=True), graded(0.5)]) == pytest.approx(0.75)
+
+
+def test_quiz_score_when_everything_is_disputed_is_neutral():
+    assert quiz.quiz_score([graded(0.0, disputed=True), graded(0.0, disputed=True)]) == quiz.NEUTRAL_SCORE
+
+
+def test_weak_areas_skip_disputed_questions():
+    qs = [graded(0.0), graded(0.0, disputed=True), graded(0.0)]
+    assert quiz.weak_areas_of(qs, ["nonlocal", "bad question topic", "Nonlocal"]) == ["nonlocal"]
+
+
+def test_disputed_flag_round_trips_and_defaults_to_false():
+    q = QuizQuestion("q", "a", disputed=True)
+    assert QuizQuestion.from_dict(q.to_dict()).disputed is True
+    assert QuizQuestion.from_dict({"question": "q", "expected_answer": "a"}).disputed is False  # old checkpoints
+
+
+# --- a dropped connection is retried once -----------------------------------------------------------------
+
+class FlakyLLM:
+    def __init__(self, content, failures):
+        self.content, self.failures, self.calls = content, failures, 0
+
+    def invoke(self, messages):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+        return AIMessage(content=json.dumps(self.content))
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    monkeypatch.setattr("llm.time.sleep", lambda s: None)
+
+
+def test_grading_survives_one_dropped_connection(monkeypatch, no_sleep):
+    """Seen live: a RemoteProtocolError turned a 0.0 into the neutral 0.5."""
+    flaky = FlakyLLM(verdict("wrong", 0.0, "No."), failures=1)
+    monkeypatch.setattr(quiz, "build_llm", lambda **_: flaky)
+    g = grade_answer("q", "e", "a")
+    assert g["score"] == 0.0 and flaky.calls == 2
+
+
+def test_grading_falls_back_after_two_dropped_connections(monkeypatch, no_sleep):
+    flaky = FlakyLLM(verdict("wrong", 0.0), failures=5)
+    monkeypatch.setattr(quiz, "build_llm", lambda **_: flaky)
+    assert grade_answer("q", "e", "a")["score"] == 0.5 and flaky.calls == 2
+
+
+def test_question_generation_survives_one_dropped_connection(monkeypatch, no_sleep):
+    flaky = FlakyLLM({"questions": [{"question": "Why LEGB?", "code": "", "expected_answer": "Scopes.",
+                                     "difficulty": "easy"}]}, failures=1)
+    monkeypatch.setattr(quiz, "build_llm", lambda **_: flaky)
+    assert generate_questions("Scope", "x")[0]["question"] == "Why LEGB?"
+
+
+# --- comments are stripped from code (they leak answers) ------------------------------------------------------
+
+@pytest.mark.parametrize("code, expected", [
+    ("x = 1  # one\nprint(x)  # prints 1", "x = 1\nprint(x)"),
+    ("# What does this print?\nprint(1)", "print(1)"),
+    ("print('# not a comment')  # real comment", "print('# not a comment')"),
+    ("a = 1\n\nb = 2  # keep the blank line above", "a = 1\n\nb = 2"),
+    ("s = \"\"\"line\n\n# inside a string\n\"\"\"\nprint(s)", "s = \"\"\"line\n\n# inside a string\n\"\"\"\nprint(s)"),
+    ("def f():\n    # explain\n    return 1\nprint(f())", "def f():\n    return 1\nprint(f())"),
+])
+def test_strip_comments(code, expected):
+    assert quiz.strip_comments(code) == expected
+
+
+def test_strip_comments_leaves_untokenizable_code_alone():
+    assert quiz.strip_comments("x = (  # unclosed") == "x = (  # unclosed"
+
+
+def test_comments_are_stripped_before_the_code_is_shown_and_run(llm_returns):
+    llm_returns(quiz, {"questions": [code_q("def f():\n    return 2  # the answer is 2\nprint(f())  # What does this print?")]})
+    q = generate_questions("x", "x")[0]
+    assert q["code"] == "def f():\n    return 2\nprint(f())" and q["verified"] == "2"
+
+
+# --- multiple-choice wording without options is dropped ------------------------------------------------------------
+
+def test_which_of_the_following_without_options_is_dropped(llm_returns, capsys):
+    llm_returns(quiz, {"questions": [
+        {"question": "Which of the following is true about the default argument in add_item?", "code": "",
+         "expected_answer": "It is shared.", "difficulty": "hard"},
+        {"question": "Why use None as a default?", "code": "", "expected_answer": "B", "difficulty": "easy"}]})
+    assert [q["question"] for q in generate_questions("x", "x")] == ["Why use None as a default?"]
+    assert "Dropped a question" in capsys.readouterr().out
+
+
+# --- a second attempt covers dropped questions ------------------------------------------------------------------------
+
+class SeqLLM:
+    """Returns each scripted payload in turn (a dict becomes JSON; an Exception is raised)."""
+
+    def __init__(self, *payloads):
+        self.payloads, self.calls = list(payloads), 0
+
+    def invoke(self, messages):
+        self.calls += 1
+        payload = self.payloads.pop(0)
+        if isinstance(payload, Exception):
+            raise payload
+        return AIMessage(content=payload if isinstance(payload, str) else json.dumps(payload))
+
+
+def concept(text):
+    return {"question": text, "code": "", "expected_answer": "A", "difficulty": "easy"}
+
+
+def seq(monkeypatch, *payloads):
+    llm = SeqLLM(*payloads)
+    monkeypatch.setattr(quiz, "build_llm", lambda **_: llm)
+    return llm
+
+
+def test_second_attempt_makes_up_the_shortfall(monkeypatch):
+    llm = seq(monkeypatch,
+              {"questions": [code_q("print(1)"), code_q("x = 1")]},            # 1 usable, 1 prints nothing
+              {"questions": [concept("Why A?"), concept("Why B?"), concept("Why C?")]})
+    qs = generate_questions("x", "x", n=3)
+    assert llm.calls == 2 and len(qs) == 3
+    assert [q["question"] for q in qs] == ["What does this code print?", "Why A?", "Why B?"]
+
+
+def test_no_second_attempt_when_the_first_is_enough(monkeypatch):
+    llm = seq(monkeypatch, {"questions": [concept("Why A?"), concept("Why B?"), concept("Why C?")]})
+    assert len(generate_questions("x", "x", n=3)) == 3 and llm.calls == 1
+
+
+def test_second_attempt_asks_only_for_what_is_missing(monkeypatch):
+    asked = []
+
+    def build(**kwargs):
+        return type("L", (), {"invoke": lambda self, m: (asked.append(m[0].content), AIMessage(
+            content=json.dumps({"questions": [concept("Why A?")]})))[1]})()
+    monkeypatch.setattr(quiz, "build_llm", build)
+    generate_questions("x", "x", n=3)
+    assert f"exactly {3 + quiz.EXTRA_QUESTIONS}" in asked[0]
+    assert f"exactly {2 + quiz.EXTRA_QUESTIONS}" in asked[1]  # one question was already collected
+
+
+def test_duplicate_questions_across_attempts_are_skipped(monkeypatch):
+    seq(monkeypatch, {"questions": [concept("Why A?")]}, {"questions": [concept("Why A?"), concept("Why B?")]})
+    assert [q["question"] for q in generate_questions("x", "x", n=2)] == ["Why A?", "Why B?"]
+
+
+def test_at_most_two_attempts(monkeypatch):
+    llm = seq(monkeypatch, {"questions": []}, {"questions": []}, {"questions": [concept("never asked")]})
+    assert "own words" in generate_questions("x", "x")[0]["question"] and llm.calls == 2
+
+
+def test_a_failure_on_the_second_attempt_keeps_the_first_questions(monkeypatch):
+    seq(monkeypatch, {"questions": [concept("Why A?")]}, ConnectionError("tunnel dropped"))
+    assert [q["question"] for q in generate_questions("x", "x", n=3)] == ["Why A?"]
+
+
+def test_unusable_first_attempt_is_not_retried(monkeypatch):
+    llm = seq(monkeypatch, "not json at all", {"questions": [concept("never asked")]})
+    assert "own words" in generate_questions("x", "x")[0]["question"] and llm.calls == 1
