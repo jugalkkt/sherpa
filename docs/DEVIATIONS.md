@@ -323,3 +323,158 @@ Live results (qwen2.5:7b, 3 runs each, stable): wrong answer 0.00, correct
 partial 0.50, all pass with more margin than before (wrong 0.30 vs limit 0.35,
 partial 0.70 vs limit 0.75).
 Cosmetic, not fixed: some feedback refers to "the student" instead of "you".
+
+## Hosting (built after Phase 8, before Phases 9-11)
+
+Requested out of order: host Sherpa for free, with a button that starts the
+Kaggle model server and an idle shutdown after 30 minutes. Hosting needs a web
+UI, so `streamlit_app.py` (the plan's Phase 10) exists now, without Phase 9
+features. Details: `docs/DEPLOYMENT.md`.
+
+- `interrupt_before=["explainer", "quiz_generator"]` (the plan: only
+  `quiz_generator`). Pausing before the Explainer lets the UI show the Coach's
+  note and a separate "Explaining..." spinner, and read the Coach's message as
+  the last AIMessage before the next topic starts.
+- Kaggle server: a *script* kernel (`deploy/kaggle/sherpa_ollama_server.py`)
+  pushed by `kaggle kernels push`. Verified against kaggle 2.2.4: there is no
+  usable cancel (the SDK's `cancel_kernel_session` needs a session id no
+  response returns), so shutdown is the server's own idle watchdog, plus
+  `MAX_HOURS` and Kaggle's `session_timeout_seconds`.
+- Idle detection uses Ollama itself: `OLLAMA_KEEP_ALIVE=IDLE_MINUTES`, and the
+  watchdog exits when `/api/ps` shows no loaded model.
+- Secrets reach Kaggle through a private dataset, not Kaggle Secrets (not
+  available in API-started runs).
+- ngrok uses a traffic-policy file (basic-auth + Host rewrite, from ngrok's
+  official Ollama example); the `--basic-auth` / `--host-header` flags are
+  deprecated.
+- The Ollama installer now needs `zstd`; the server installs it first.
+- `kaggle==2.2.4` added. `import kaggle` authenticates on import (a network
+  call), so it's imported only when Start or status needs it.
+- Streamlit Cloud entry point is `deploy/streamlit/streamlit_app.py` so that
+  `deploy/streamlit/requirements.txt` (slim, ~540 MB installed vs 1.3 GB) is
+  used. Verified by installing only that file in a clean venv and running the
+  app through the entry point.
+- `st.set_page_config` is called before reading `st.secrets` (found by the
+  AppTest suite: reading secrets counts as the first Streamlit command).
+- Not verified yet: a real Kaggle run (needs your go-ahead; it uses your GPU
+  quota) and a real Community Cloud deploy.
+
+### First live hosting run (2026-10-05)
+
+- `make server-secrets` created the private dataset; `make server-start`
+  pushed the kernel. 🟢 ready about 2.5 minutes after Start.
+- Verified on the live server: model fully in GPU memory (5.1/5.1 GB),
+  `context_length` 8192, `expires_at` exactly `SERVER_IDLE_MINUTES` after the
+  last request, and requests without credentials get 401 (traffic policy works).
+- Latency: the first request took 46 s (one-off); repeat calls about 1 s, of
+  which under 0.1 s is GPU time and the rest the tunnel round trip.
+- Fixed along the way: a kernel that was never pushed answers 401/403 ("wrong
+  kernel slug"), not 404, so the status showed "error" before the first Start.
+  It now shows "stopped / not started yet".
+- Added `OLLAMA_CONTEXT_LENGTH=8192`, taken from the hand-run notebook.
+
+## Post-hosting fix: wrong expected answers about code (fixes A + B + C)
+
+Live failure: for `add_item(item, bucket=None)` called three times, the quiz
+stored the expected answer "[5, 10, 15]" (the model mixed up the buggy
+`bucket=[]` version from the notes) and graded the correct answer
+"[5] [10] [15], new bucket every call" at 0%. The grader's feedback then
+described a bug the code doesn't have. The question also had no `print`, so
+"what is the output?" had no answer at all.
+
+**A. Run the code.** `src/code_runner.py` executes a question's snippet and the
+real stdout (or the exception) becomes the expected answer, labelled "Verified
+output (from running the code)". Two layers, since the code is model-written:
+1. AST check: imports limited to functools, itertools, collections, math, copy,
+   operator, typing, dataclasses, contextlib; no open/eval/exec/getattr/input;
+   dunder attributes outside a short list (`__globals__`, `__subclasses__`,
+   `__self__`, ...), frame attributes (`gi_frame`, `f_globals`), `.format` and
+   `co_*=` keywords are refused.
+2. A separate `python -I -S` process: empty environment (no tokens), temp working
+   directory, CPU 3 s / memory 1 GB / no file writes / 32 fds, 5 s wall clock,
+   4000-char stdout cap, reduced builtins, and a `sys.addaudithook` tripwire that
+   blocks open/os/subprocess/socket/ctypes at interpreter level.
+Testing layer 2 on its own showed it was NOT enough alone: `print.__self__`
+reaches the real builtins module and read `/etc/passwd`. The audit hook was added
+for that, and the tests now exercise both layers separately. This is defence in
+depth for snippets a 7B model wrote from your notes, not a boundary against a
+determined attacker; do not feed it arbitrary user code.
+
+**B. Code must print.** Prompt asks for scripts that `print()` or deliberately
+raise; code that prints nothing and raises nothing is dropped (nothing to ask).
+Drops are common (3 of 5 in one live run), so the model is asked for
+`n + 2` questions and, if too few survive, once more for the shortfall
+(`MAX_ATTEMPTS = 2`). Duplicates are skipped inside the batch (a test caught
+duplicates using up the one slot of the second attempt).
+
+**C. Expected answer + dispute button (web UI).** After grading, an "Expected
+answer" expander shows what the answer was compared against, and "🚩 This grade
+is wrong" excludes the question from the score (`QuizQuestion.disputed`,
+`quiz_score`, `weak_areas_of`; all disputed -> neutral 0.5). The terminal CLI
+doesn't have the button.
+
+### What the first version got wrong (found by live runs, not unit tests)
+
+- I first asked the model to *explain* the verified output. On the bug case it
+  explained the wrong mechanism ("the list is shared"), the grader followed it,
+  and the correct answer scored 0.0 again. The explanation step was removed:
+  code questions now ask only for the output/error, and the expected answer is
+  only the verified output.
+- The model's question wording was wrong or leaked the answer ("will this raise?"
+  for code that prints; "why does this raise UnboundLocalError?"). Code-question
+  text is now written by the app from what the code did ("What does this code
+  print?" / "What error does this code raise?").
+- Comments inside the code ("# local", "# What does this print? Why?") leaked
+  answers: they are stripped with the tokenizer (strings containing `#` and blank
+  lines are preserved).
+- "Which of the following..." questions with no options are dropped.
+- A dropped connection (`RemoteProtocolError`) turned a 0.0 into the neutral 0.5;
+  `llm.invoke_with_retry` retries once on dropped connections (not on timeouts
+  or HTTP errors). Used by question writing and grading.
+
+Live results (qwen2.5:7b): original answer to the bug question 0.85 x3 (was 0.0);
+the old wrong answer 0.0; 17 of 18 hand-written answers graded as intended (a
+loosely-worded prose answer got 0.5 = partial). Three live quizzes: 3 questions
+each, all code questions verified, no leaked wording, concept questions in 2 of
+3 (the prompt asks for at least one; the model doesn't always comply).
+
+Remaining limits: concept (non-code) questions still use model-written expected
+answers and can be wrong, which is what the dispute button is for; the grader is
+only checked against the verified output for code questions.
+
+Eval change: "quiz tests understanding" scored 0.00 twice after the change. The
+judge claimed the closure questions were unrelated to closures, because the
+bare "What does this code print?" wording gave it nothing to go on, and the
+rubric was written for prose questions. The rubric now says output-prediction
+counts as an application question and to judge the code itself (not loosened
+until it passed: 0.70 on 3 of 3 runs, same as before). Added a judge-free check
+that re-runs every code question and compares the stored answer to reality.
+
+Hosting note from the same session: the sidebar showed "starting" for about a
+minute three times while evals hammered the server (the tunnel's /api/tags check
+timed out while Ollama was busy). Cosmetic; it recovers by itself.
+
+## Public URL: rehearsing the Streamlit Cloud deploy
+
+Rehearsed in a clean venv with only `deploy/streamlit/requirements.txt`, no `.env`,
+a different working directory, and settings delivered through `.streamlit/secrets.toml`
+(headless, via Streamlit's AppTest). Findings:
+
+- **A missing/invalid Kaggle token would have broken the page.** `import kaggle`
+  runs a login attempt and prints a long help text; `authenticate()` then calls
+  `sys.exit()`, which `except Exception` doesn't catch, so the page's script run
+  died (the rehearsal timed out). `_kaggle_api()` now captures the import's and
+  login's output and turns SystemExit into a RuntimeError, so the sidebar shows
+  "🔴 Kaggle login failed. Set KAGGLE_API_TOKEN..." and the rest of the app works.
+- Verified: the entry point `deploy/streamlit/streamlit_app.py` runs from another
+  cwd; the password gate works (wrong password rejected); secrets reach
+  `os.environ`; the Kaggle login works from an environment variable alone with an
+  empty HOME (no `~/.kaggle`), which is how Cloud supplies it.
+- **Idle shutdown confirmed from the Kaggle run's own log:** READY 11:14:00
+  (2 minutes after Start), last request about 12:30, "Stopping: idle: no requests
+  for 30 minutes (model unloaded)" at 13:00:31, run status COMPLETE. 1 h 48 min of GPU.
+- `.streamlit/secrets.toml` (git-ignored, mode 600) is generated from `.env` for
+  pasting into the Cloud dashboard. It deliberately omits the Kaggle token, which
+  is added by hand there.
+- Not verified: an actual deploy on share.streamlit.io (needs your GitHub and
+  Streamlit login), or whether free accounts can use a private repo.
