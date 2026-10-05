@@ -9,7 +9,13 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = "-m 'not eval'"
+# -p no:deepeval: deepeval's pytest plugin would import deepeval (and its
+# telemetry) on every run, even unit-only ones. Our evals don't need it.
+addopts = "-m 'not eval' -p no:deepeval"
+filterwarnings = [
+    # starlette (pulled in by mcp) imports the old `multipart` name
+    "ignore:Please use `import python_multipart` instead:PendingDeprecationWarning",
+]
 markers = [
     "unit: fast tests that never call an LLM",
     "eval: LLM-quality evals that need a running Ollama",
