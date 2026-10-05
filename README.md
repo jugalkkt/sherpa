@@ -6,6 +6,7 @@ topic from your own Markdown notes, quizzes you, and coaches you on what to
 review.
 
 > Work in progress. See [plan.md](plan.md) for the build plan.
+Next step is phase 9
 
 ## Quick start
 
