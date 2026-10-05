@@ -49,8 +49,8 @@ langfuse-stop:  ## Stop the Langfuse stack
 test:  ## Unit tests (no Ollama needed)
 	$(PYTHON) -m pytest -m "not eval"
 
-eval:  ## LLM-quality evals (needs Ollama)
-	$(PYTHON) -m pytest tests/test_eval.py -m eval -s -v
+eval:  ## LLM-quality evals (needs Ollama; reads .env)
+	DEEPEVAL_TELEMETRY_OPT_OUT=YES $(PYTHON) -m pytest tests/test_eval.py -m eval -s -v
 
 test-all:  ## Unit tests, then evals
 	$(MAKE) test
