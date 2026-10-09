@@ -12,7 +12,7 @@ Settings (env / Streamlit secrets, read at call time):
     KAGGLE_API_TOKEN         Kaggle API token (or ~/.kaggle/access_token locally)
     KAGGLE_KERNEL_SLUG       e.g. "yourname/sherpa-ollama-server"
     KAGGLE_SECRETS_DATASET   e.g. "yourname/sherpa-server-secrets" (private)
-    SERVER_IDLE_MINUTES      default 30
+    SERVER_IDLE_MINUTES      default 10
     SERVER_MAX_HOURS         default 3
     KAGGLE_ACCELERATOR       default "NvidiaTeslaT4"
     OLLAMA_MODEL / OLLAMA_BASE_URL / OLLAMA_BASIC_AUTH  (same as the app)
@@ -60,7 +60,7 @@ class ServerStatus:
 
 
 def idle_minutes() -> int:
-    return int(os.getenv("SERVER_IDLE_MINUTES") or 30)
+    return int(os.getenv("SERVER_IDLE_MINUTES") or 10)
 
 
 def max_hours() -> float:

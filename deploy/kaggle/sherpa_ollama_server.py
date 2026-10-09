@@ -30,7 +30,7 @@ import urllib.request
 
 # --- settings: the launcher rewrites these three lines before pushing ----------
 MODEL = "qwen2.5:7b"
-IDLE_MINUTES = 30
+IDLE_MINUTES = 10
 MAX_HOURS = 3.0
 # -------------------------------------------------------------------------------
 

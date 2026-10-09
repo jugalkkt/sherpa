@@ -4,13 +4,13 @@
 Browser ──► Streamlit Community Cloud (the web app, password-protected)
                  │  ▶ Start button: pushes a Kaggle script kernel
                  ▼
-            Kaggle GPU: Ollama + ngrok  ──(stops itself after 30 idle minutes)
+            Kaggle GPU: Ollama + ngrok  ──(stops itself after 10 idle minutes)
                  ▲
                  └── the app calls https://<your-ngrok-domain> with basic auth
 ```
 
 You press **Start** in the sidebar, Kaggle brings up the model in a few
-minutes, you study, and the server shuts itself down 30 minutes after the
+minutes, you study, and the server shuts itself down 10 minutes after the
 last request.
 
 ## What you need (one time)
@@ -32,7 +32,7 @@ NGROK_AUTHTOKEN=<from the ngrok dashboard>
 KAGGLE_KERNEL_SLUG=<kaggle-username>/sherpa-ollama-server
 KAGGLE_SECRETS_DATASET=<kaggle-username>/sherpa-server-secrets
 APP_PASSWORD=<password for the web app>
-SERVER_IDLE_MINUTES=30
+SERVER_IDLE_MINUTES=10
 SERVER_MAX_HOURS=3
 ```
 
