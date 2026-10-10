@@ -248,6 +248,18 @@ def show_roadmap(roadmap: StudyRoadmap) -> None:
         st.markdown(f"{i}. **{t.title}** ({t.estimated_minutes} min): {t.description}{needs}{sources}")
 
 
+# The uploader's own hint reads "Limit 200MB per file" (Streamlit's server-wide
+# limit, set in whole MB, with no per-widget option in 1.43). Replace that line
+# with the real limit, which validate_uploads enforces.
+UPLOAD_LIMIT_CSS = f"""<style>
+[data-testid="stFileUploaderDropzoneInstructions"] small {{ font-size: 0; }}
+[data-testid="stFileUploaderDropzoneInstructions"] small::after {{
+  content: "Limit {MAX_FILE_BYTES // 1024}KB per file, up to {MAX_FILES} files \\2022  MD, TXT";
+  font-size: 0.875rem;
+}}
+</style>"""
+
+
 def screen_goal() -> None:
     st.title("🏔️ Sherpa")
     st.write("Tell me what you want to learn. I'll plan a roadmap, explain each topic from "
@@ -258,6 +270,7 @@ def screen_goal() -> None:
     st.markdown(f"**You can upload up to {MAX_FILES} `.md` or `.txt` files, max {MAX_FILE_BYTES // 1024} KB "
                 "each, related to your learning goal.** Without uploads, Sherpa uses its built-in "
                 "sample notes (Python closures and decorators).")
+    st.markdown(UPLOAD_LIMIT_CSS, unsafe_allow_html=True)
     files = st.file_uploader("Your notes (optional)", type=["md", "txt"], accept_multiple_files=True,
                              help="Fixed once the session starts. To change them, use Start over.")
     uploads = [(f.name, f.getvalue()) for f in files or []]

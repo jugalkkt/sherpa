@@ -247,3 +247,9 @@ def test_roadmap_from_the_goal_shows_no_sources(app, mocked_llms):
     at.button[0].click().run()  # Start session
     assert not any("from:" in m.value for m in at.markdown)
     assert not any("Built from your notes" in c.value for c in at.caption)
+
+
+def test_uploader_hint_shows_the_real_limit_not_streamlits(app):
+    at = app()
+    css = next(m.value for m in at.markdown if "stFileUploaderDropzoneInstructions" in m.value)
+    assert 'content: "Limit 15KB per file, up to 5 files' in css
