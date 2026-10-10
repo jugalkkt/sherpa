@@ -297,6 +297,8 @@ Live check, 3 generations × 3 questions: all 9 questions self-contained.
 Known 7B limitation, not fixed: some *expected answers* are partly wrong
 (e.g. "use nonlocal" for a module-level variable; wrong reasoning on why
 `add_item(1, [])` prints `[1]`). The grader compares against these.
+The same 8,192-token context also caps uploaded notes at 5 files × 15 KB (see
+"Uploading your own notes" at the end).
 
 ## Post-Phase 8 fix: grader gave 50% to an answer that stated the opposite
 
@@ -478,3 +480,32 @@ a different working directory, and settings delivered through `.streamlit/secret
   is added by hand there.
 - Not verified: an actual deploy on share.streamlit.io (needs your GitHub and
   Streamlit login), or whether free accounts can use a private repo.
+
+## Uploading your own notes (web app)
+
+The start screen accepts up to 5 `.md` / `.txt` files of at most 15 KB each.
+They replace the sample notes for that browser session only.
+
+- **Limitation, by design for now:** the hosted `qwen2.5:7b` runs with an
+  8,192-token context. A 15 KB file is about 4-5k tokens, and the Explainer
+  must fit one whole file next to its prompt, tool results and reply. To be
+  raised once a bigger model with a longer context is hosted on Kaggle (the
+  constants to change are listed in DEPLOYMENT.md, "Limits to know").
+- `study_materials_path` (in the state since Phase 1, unused until now) holds
+  the session's upload folder. Its default changed from
+  `"study_materials/sample_notes"` to `""`, which means "no uploads: the
+  Explainer reads `NOTES_PATH` and the Planner plans from the goal". The CLI
+  is unchanged.
+- The notes server takes the folder from a `ContextVar` (`use_notes_dir`),
+  not from a tool argument, so an MCP client can never pick a folder.
+  `NOTES_BASE` stays the shared default, and ContextVars are per thread, so
+  concurrent Streamlit sessions can't see each other's notes.
+- `.txt` uploads are saved as `.md`, so the notes server keeps its
+  Markdown-only rule (tested for security) unchanged.
+- The Planner gets an outline (`notes_digest`: per file, headings outside
+  code blocks, then opening text; 6,000 characters split evenly across files)
+  and the rule "build topics from what the notes cover". It does this only
+  when there are uploads; with the sample notes it plans from the goal as
+  before.
+- The Explainer prompt now says to read the ONE most relevant file (was
+  "file(s)"): two 15 KB files would overflow the context.

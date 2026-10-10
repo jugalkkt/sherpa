@@ -135,6 +135,8 @@ class AgentState(TypedDict):
     current_topic_index: int
     quiz_results: list[QuizResult]
     weak_areas: list[str]
+    # Folder of notes the learner uploaded (web app). "" means none: the
+    # Explainer reads NOTES_PATH and the Planner plans from the goal alone.
     study_materials_path: str
     error: str | None
 
@@ -142,7 +144,7 @@ class AgentState(TypedDict):
 def initial_state(
     goal: str,
     session_id: str,
-    study_materials_path: str = "study_materials/sample_notes",
+    study_materials_path: str = "",
 ) -> dict:
     """The ONLY way to create a fresh state. Sets every AgentState key."""
     return {

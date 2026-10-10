@@ -8,6 +8,10 @@ questions itself with the same generate_questions / grade_answer functions,
 then writes the result back with update_state(as_node="quiz_generator").
 
 The sidebar starts the Kaggle model server (see src/hosting/kaggle_server.py).
+
+The learner may upload their own notes on the goal screen (see
+src/notes_upload.py). They are saved to a temp folder for this browser
+session, and that folder goes into the graph state as study_materials_path.
 """
 
 import sys
@@ -58,6 +62,7 @@ from agents.quiz_generator import (  # noqa: E402
 from graph.state import QuizQuestion, QuizResult, StudyRoadmap, get_current_topic, initial_state  # noqa: E402
 from graph.workflow import build_graph  # noqa: E402
 from hosting.kaggle_server import idle_minutes, server_status, start_server  # noqa: E402
+from notes_upload import MAX_FILE_BYTES, MAX_FILES, remove_uploads, save_uploads, validate_uploads  # noqa: E402
 from observability.langfuse_setup import flush_langfuse, get_langfuse_config  # noqa: E402
 
 # Same reasons as main.py: FastMCP turns on INFO logging for everything.
@@ -77,6 +82,7 @@ S = st.session_state
 
 
 def reset_session() -> None:
+    remove_uploads(S.get("notes_dir"))
     for key in list(S.keys()):
         if key not in ("authed", "server_ready"):
             del S[key]
@@ -169,12 +175,16 @@ def advance(result: dict | None = None) -> None:
         return
 
 
-def start_session(goal: str) -> None:
+def start_session(goal: str, uploads: list[tuple[str, bytes]]) -> None:
+    remove_uploads(S.get("notes_dir"))  # from an earlier attempt that failed to plan
+    S.notes_dir = str(save_uploads(uploads)) if uploads else ""
+    S.notes_files = sorted(p.name for p in Path(S.notes_dir).glob("*.md")) if uploads else []
     S.session_id = uuid.uuid4().hex[:8]
     S.config = get_langfuse_config(S.session_id)
     S.coach_notes, S.error = [], None
+    state = initial_state(goal, S.session_id, study_materials_path=S.notes_dir)
     with st.spinner("Planning your roadmap..."):
-        result = get_graph().invoke(initial_state(goal, S.session_id), S.config)
+        result = get_graph().invoke(state, S.config)
     advance(result)
 
 
@@ -238,11 +248,20 @@ def screen_goal() -> None:
     if S.get("error"):
         st.error(S.error)
     goal = st.text_input("Learning goal", value="Learn Python closures and decorators from scratch")
+    st.markdown(f"**You can upload up to {MAX_FILES} `.md` or `.txt` files, max {MAX_FILE_BYTES // 1024} KB "
+                "each, related to your learning goal.** Without uploads, Sherpa uses its built-in "
+                "sample notes (Python closures and decorators).")
+    files = st.file_uploader("Your notes (optional)", type=["md", "txt"], accept_multiple_files=True,
+                             help="Fixed once the session starts. To change them, use Start over.")
+    uploads = [(f.name, f.getvalue()) for f in files or []]
+    problems = validate_uploads(uploads)
+    for problem in problems:
+        st.error(problem)
     ready = S.get("server_ready", False)
     if not ready:
         st.info("Start the model server in the sidebar first. It takes a few minutes to come up.")
-    if st.button("Start session", type="primary", disabled=not ready or not goal.strip()):
-        start_session(goal.strip())
+    if st.button("Start session", type="primary", disabled=not ready or not goal.strip() or bool(problems)):
+        start_session(goal.strip(), uploads)
         st.rerun()
 
 
@@ -342,6 +361,7 @@ def main() -> None:
         server_panel()
         if S.get("session_id"):
             st.caption(f"Session {S.session_id}")
+            st.caption("📄 Notes: " + (", ".join(S.get("notes_files") or []) or "built-in samples"))
             if st.button("Start over"):
                 reset_session()
                 st.rerun()

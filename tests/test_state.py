@@ -120,7 +120,7 @@ def test_initial_state_values():
     assert state["roadmap"] is None and state["approved"] is False
     assert state["current_topic_index"] == 0 and state["error"] is None
     assert state["messages"] == [] and state["quiz_results"] == [] and state["weak_areas"] == []
-    assert state["study_materials_path"] == "study_materials/sample_notes"
+    assert state["study_materials_path"] == ""
 
 
 def test_initial_state_lists_not_shared():

@@ -5,7 +5,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 import agents.curriculum_planner as planner
-from agents.curriculum_planner import curriculum_planner_node, parse_roadmap_json
+from agents.curriculum_planner import NOTES_RULE, curriculum_planner_node, notes_digest, parse_roadmap_json
 from graph.state import StudyRoadmap, Topic, initial_state
 
 pytestmark = pytest.mark.unit
@@ -155,3 +155,47 @@ def test_node_llm_exception_returns_error(monkeypatch):
 def test_planner_llm_is_json_mode_low_temp():
     llm = planner.build_planner_llm()
     assert llm.format == "json" and llm.temperature == 0.1
+
+
+# --- planning from uploaded notes --------------------------------------------------------
+
+def test_digest_has_headings_and_opening_text(tmp_path):
+    (tmp_path / "sorting.md").write_text(
+        "# Sorting\nIntro text.\n## Quicksort\n```python\n# not a heading\n```\n## Mergesort\n")
+    digest = notes_digest(tmp_path)
+    assert digest.startswith("--- sorting.md ---\n# Sorting\n## Quicksort\n## Mergesort\n")
+    assert "Start of the file:\n# Sorting\nIntro text." in digest
+    assert "# not a heading" not in digest.split("Start of the file:")[0]
+
+
+def test_digest_without_headings_uses_opening_text(tmp_path):
+    (tmp_path / "plain.md").write_text("just some plain text notes")
+    assert notes_digest(tmp_path) == "--- plain.md ---\n\nStart of the file:\njust some plain text notes"
+
+
+def test_digest_stays_within_budget_and_covers_every_file(tmp_path):
+    for name in ("a.md", "b.md", "c.md"):
+        (tmp_path / name).write_text("# Title\n" + "x" * 20_000)
+    digest = notes_digest(tmp_path, budget_chars=3000)
+    assert len(digest) <= 3000 + 2 * len("\n\n")
+    assert all(f"--- {n} ---" in digest for n in ("a.md", "b.md", "c.md"))
+
+
+def test_digest_of_empty_or_missing_folder(tmp_path):
+    assert notes_digest(tmp_path) == ""
+    assert notes_digest(tmp_path / "gone") == ""
+
+
+def test_node_sends_digest_only_with_uploads(monkeypatch, tmp_path):
+    (tmp_path / "sorting.md").write_text("# Sorting\n## Quicksort\n")
+    llm = mock_llm(json.dumps(roadmap_dict()))
+    monkeypatch.setattr(planner, "build_planner_llm", lambda: llm)
+
+    curriculum_planner_node(initial_state("Learn sorting", "s1", study_materials_path=str(tmp_path)))
+    _, human = llm.invoke.call_args.args[0]
+    assert "Learn sorting" in human.content and NOTES_RULE in human.content
+    assert "## Quicksort" in human.content
+
+    curriculum_planner_node(initial_state("Learn sorting", "s1"))
+    _, human = llm.invoke.call_args.args[0]
+    assert human.content == "Learning goal: Learn sorting"

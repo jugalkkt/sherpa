@@ -108,6 +108,14 @@ redeploys automatically.
   so a half-finished session can't be resumed after that.
 - **Kaggle's terms.** Running a tunnelled model server from a notebook is a grey
   area; the risk is to your Kaggle account.
+- **Uploaded notes: 5 files × 15 KB, for now.** The model runs with
+  `CONTEXT_LENGTH = 8192` tokens (`deploy/kaggle/sherpa_ollama_server.py`), and
+  the Explainer has to fit a whole file in it next to its prompt and reply.
+  Uploads live in a temp folder for the browser session only, and are lost on
+  an app restart. **Planned:** host a bigger model with a longer context on
+  Kaggle, then raise these together:
+  `CONTEXT_LENGTH`, `MAX_FILES` and `MAX_FILE_BYTES` (`src/notes_upload.py`),
+  and `NOTES_DIGEST_CHARS` (`src/agents/curriculum_planner.py`).
 
 ## Troubleshooting
 

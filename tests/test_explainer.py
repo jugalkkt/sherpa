@@ -200,3 +200,16 @@ def test_nothing_recorded_on_failure(sample_state, use_llm):
     use_llm(ScriptedLLM(*[AIMessage(content="", tool_calls=[call("list_files")])] * MAX_ITERATIONS))
     explainer_node(sample_state)
     assert mem.memory_get("test1234", "explained_topics") == "null"
+
+
+def test_uploaded_notes_replace_the_default_folder(sample_state, use_llm, tmp_path):
+    (tmp_path / "sorting.md").write_text("# Sorting\n")
+    llm = use_llm(ScriptedLLM(
+        AIMessage(content="", tool_calls=[call("list_files")]),
+        AIMessage(content="Final explanation."),
+    ))
+    out = explainer_node({**sample_state, "study_materials_path": str(tmp_path)})
+    assert out["error"] is None
+    assert json.loads(out["messages"][3].content) == ["sorting.md"]
+    assert "closures.md" in tool_list_files.invoke({})  # only for that call
+    assert len(llm.calls) == 2

@@ -2,18 +2,25 @@
 
 Single JSON-mode call at low temperature. Parsing lives in
 ``parse_roadmap_json`` so it can be tested without an LLM.
+
+When the learner uploaded notes (state["study_materials_path"]), the call
+also carries an outline of them (``notes_digest``), and the topics must come
+from the notes: the Explainer can only teach what they cover. The outline is
+capped so it fits the hosted model's 8,192-token context.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 
 from graph.state import StudyRoadmap, Topic
 from llm import build_llm, describe_llm_error
+from mcp_servers.filesystem_server import list_study_files, read_study_file, use_notes_dir
 
 PLANNER_SYSTEM_PROMPT = """\
 You are a curriculum planner. Turn the learner's goal into a study roadmap.
@@ -43,10 +50,51 @@ Rules:
 - Every number is a JSON integer, not a string.
 """
 
+NOTES_RULE = """\
+The learner uploaded their own notes; an outline of them follows. Build the
+topics from what the notes cover, in service of the goal. Do not add topics
+the notes don't cover."""
+
+# About 1,500-2,000 tokens, leaving room for the prompt and the roadmap JSON.
+NOTES_DIGEST_CHARS = 6000
+
 REQUIRED_KEYS = ("goal", "total_weeks", "topics")
 REQUIRED_TOPIC_KEYS = ("title", "description", "estimated_minutes")
 
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
+
+
+def _headings(text: str) -> list[str]:
+    """Markdown heading lines, skipping code blocks (where "# ..." is a comment)."""
+    found, in_code = [], False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code = not in_code
+        elif not in_code and re.match(r"#{1,6}\s", stripped):
+            found.append(stripped)
+    return found
+
+
+def notes_digest(base: str | Path, budget_chars: int = NOTES_DIGEST_CHARS) -> str:
+    """An outline of the notes in `base`: per file, its headings, then its opening
+    text. The budget is split evenly across files, so no file crowds out the rest."""
+    with use_notes_dir(base):
+        names = list_study_files()
+        texts = [read_study_file(name) for name in names]
+    if not names:
+        return ""
+    per_file = budget_chars // len(names)
+    sections = []
+    for name, text in zip(names, texts):
+        if text.startswith("Error:"):
+            continue
+        section = f"--- {name} ---\n" + "\n".join(_headings(text))
+        room = per_file - len(section) - len("\nStart of the file:\n")
+        if room > 0:
+            section += "\nStart of the file:\n" + text.strip()[:room]
+        sections.append(section[:per_file])
+    return "\n\n".join(sections)
 
 
 def build_planner_llm() -> ChatOllama:
@@ -108,18 +156,24 @@ def parse_roadmap_json(raw: str) -> StudyRoadmap:
 def curriculum_planner_node(state: dict) -> dict:
     """Generate a study roadmap for the goal.
 
-    Reads: goal
+    Reads: goal, study_materials_path
     Writes: roadmap, messages, error
     """
     goal = (state.get("goal") or "").strip()
     if not goal:
         return {"error": "No learning goal provided."}
 
-    print(f"[Planner] Building a roadmap for: {goal}")
+    request = f"Learning goal: {goal}"
+    uploaded = state.get("study_materials_path") or ""
+    digest = notes_digest(uploaded) if uploaded else ""
+    if digest:
+        request += f"\n\n{NOTES_RULE}\n\n{digest}"
+
+    print(f"[Planner] Building a roadmap for: {goal}" + (" (from the learner's notes)" if digest else ""))
     try:
         response = build_planner_llm().invoke([
             SystemMessage(content=PLANNER_SYSTEM_PROMPT),
-            HumanMessage(content=f"Learning goal: {goal}"),
+            HumanMessage(content=request),
         ])
     except Exception as exc:
         error = describe_llm_error(exc)

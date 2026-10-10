@@ -156,6 +156,54 @@ def test_index_when_empty(tmp_path, monkeypatch):
     assert "No notes found" in notes_index()
 
 
+# --- use_notes_dir (a session's uploaded notes) -------------------------------------
+
+@pytest.fixture
+def uploads(tmp_path) -> Path:
+    base = tmp_path / "uploads"
+    base.mkdir()
+    (base / "sorting.md").write_text("# Sorting\nQuicksort picks a pivot.\n")
+    return base
+
+
+def test_use_notes_dir_swaps_the_folder_then_restores_it(notes, uploads):
+    with fs.use_notes_dir(uploads):
+        assert list_study_files() == ["sorting.md"]
+        assert read_study_file("sorting.md").startswith("# Sorting")
+        assert read_study_file("closures.md").startswith("Error:")
+        assert [h["file"] for h in search_notes("pivot")] == ["sorting.md"]
+        assert "1 files" in notes_index()
+    assert "closures.md" in list_study_files()
+
+
+def test_use_notes_dir_still_blocks_escapes(uploads):
+    (uploads.parent / "outside.md").write_text("TOP SECRET")
+    with fs.use_notes_dir(uploads):
+        assert read_study_file("../outside.md").startswith("Error: access denied")
+
+
+def test_use_notes_dir_is_per_thread(notes, uploads):
+    import threading
+
+    seen = {}
+    inside, done = threading.Event(), threading.Event()
+
+    def session():
+        with fs.use_notes_dir(uploads):
+            inside.set()
+            done.wait(5)
+            seen["upload_thread"] = list_study_files()
+
+    t = threading.Thread(target=session)
+    t.start()
+    inside.wait(5)
+    seen["other_thread"] = list_study_files()  # while the other thread is inside its block
+    done.set()
+    t.join(5)
+    assert seen["upload_thread"] == ["sorting.md"]
+    assert "closures.md" in seen["other_thread"] and "sorting.md" not in seen["other_thread"]
+
+
 # --- memory -------------------------------------------------------------------------
 
 def test_set_then_get():

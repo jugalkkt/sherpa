@@ -4,12 +4,20 @@ Each tool is also a plain Python function (FastMCP's decorators return the
 function unchanged), so the Explainer can import and call them in-process.
 Tools never raise: every failure comes back as an "Error: ..." string.
 
+The folder is NOTES_BASE, unless the caller is inside use_notes_dir(path):
+the web app runs each session's Explainer that way, so learners who upload
+their own notes never see each other's. The tools take no folder argument,
+so an MCP client can never choose one.
+
 Run standalone (stdio transport): python src/mcp_servers/filesystem_server.py
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -27,17 +35,36 @@ def _notes_base() -> Path:
 
 NOTES_BASE = _notes_base()
 
+# Per thread (each Streamlit session runs in its own), so concurrent sessions
+# can't see each other's folder.
+_override_base: ContextVar[Path | None] = ContextVar("notes_base", default=None)
+
 mcp = FastMCP("Filesystem Server")
 
 
+@contextmanager
+def use_notes_dir(path: str | Path) -> Iterator[None]:
+    """Serve the notes in `path` instead of NOTES_BASE until the block ends."""
+    token = _override_base.set(Path(path))
+    try:
+        yield
+    finally:
+        _override_base.reset(token)
+
+
+def _base() -> Path:
+    return _override_base.get() or NOTES_BASE
+
+
 def _md_files() -> list[Path]:
-    if not NOTES_BASE.is_dir():
+    base = _base()
+    if not base.is_dir():
         return []
-    return sorted(p for p in NOTES_BASE.rglob("*.md") if p.is_file())
+    return sorted(p for p in base.rglob("*.md") if p.is_file())
 
 
 def _relative(path: Path) -> str:
-    return path.relative_to(NOTES_BASE).as_posix()
+    return path.relative_to(_base()).as_posix()
 
 
 @mcp.tool()
@@ -59,7 +86,7 @@ def read_study_file(filename: str) -> str:
         filename: a path exactly as returned by list_study_files,
             e.g. "closures.md".
     """
-    base = NOTES_BASE.resolve()
+    base = _base().resolve()
     # resolve() collapses "..", follows symlinks and makes absolute paths win,
     # so checking the result stays under base blocks every escape route.
     target = (base / filename).resolve()
@@ -109,7 +136,7 @@ def notes_index() -> str:
     """A Markdown index of all study notes with their sizes."""
     files = _md_files()
     if not files:
-        return f"# Study notes\n\nNo notes found in `{NOTES_BASE}`."
+        return f"# Study notes\n\nNo notes found in `{_base()}`."
     rows = [f"- `{_relative(p)}` ({p.stat().st_size / 1024:.1f} KB)" for p in files]
     return f"# Study notes ({len(files)} files)\n\n" + "\n".join(rows)
 

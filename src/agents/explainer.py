@@ -11,14 +11,15 @@ with langchain-mcp-adapters' MultiServerMCPClient; only this wrapping changes.
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import tool
 
-from graph.state import get_current_topic
+from graph.state import Topic, get_current_topic
 from llm import build_llm, describe_llm_error
-from mcp_servers.filesystem_server import list_study_files, read_study_file, search_notes
+from mcp_servers.filesystem_server import list_study_files, read_study_file, search_notes, use_notes_dir
 from mcp_servers.memory_server import memory_get, memory_set
 
 MAX_ITERATIONS = 8
@@ -73,7 +74,7 @@ own study notes. Do not rely on general knowledge when the notes cover it.
 Follow these steps, using the tools:
 1. Call list_files to see which notes exist.
 2. Call search_notes with the topic's key term to find where it is covered.
-3. Call read_file on the most relevant file(s).
+3. Call read_file on the ONE most relevant file.
 4. Call memory_get with the session id and key "{EXPLAINED_TOPICS_KEY}" to see
    what was already explained. Build on those topics; don't repeat them.
 5. Write the explanation as your final reply, with no further tool calls.
@@ -118,14 +119,19 @@ def _record_explained(session_id: str, title: str) -> None:
 def explainer_node(state: dict) -> dict:
     """Explain the current topic using the notes, via a tool-calling loop.
 
-    Reads: roadmap, current_topic_index, session_id
+    Reads: roadmap, current_topic_index, session_id, study_materials_path
     Writes: messages, error
     """
     topic = get_current_topic(state)
     if topic is None:
         return {"error": "Explainer: no current topic to explain."}
-    session_id = state.get("session_id", "")
+    uploaded = state.get("study_materials_path") or ""
+    # The learner's uploaded notes, if any, replace NOTES_PATH for this call only.
+    with use_notes_dir(uploaded) if uploaded else nullcontext():
+        return _explain(topic, state.get("session_id", ""))
 
+
+def _explain(topic: Topic, session_id: str) -> dict:
     print(f"\n[Explainer] Topic: {topic.title}")
     llm = build_explainer_llm()
     messages: list[BaseMessage] = [
