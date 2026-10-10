@@ -38,6 +38,9 @@ class Topic:
     estimated_minutes: int
     prerequisites: list[str] = field(default_factory=list)
     status: str = "pending"
+    # Section ids ("closures.md#3") of the uploaded notes this topic teaches.
+    # Empty when the roadmap came from the goal (no uploads).
+    sources: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -48,6 +51,7 @@ class Topic:
             return data
         d = _known_fields(cls, data)
         d["prerequisites"] = list(d.get("prerequisites") or [])
+        d["sources"] = list(d.get("sources") or [])
         return cls(**d)
 
 

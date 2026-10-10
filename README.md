@@ -33,9 +33,15 @@ from the app that stops itself when idle), see [docs/DEPLOYMENT.md](docs/DEPLOYM
 
 On the start screen you can upload up to 5 `.md` or `.txt` files (max 15 KB
 each) related to your learning goal. They replace the sample notes for that
-session: the roadmap is built from them and every topic is explained from
-them. Without uploads, the sample notes are used and the roadmap comes from
-the goal alone. Notes are fixed once the session starts; to change them, use
+session, and the roadmap is built **only** from them: your notes are split
+into sections (at `#` and `##` headings), every section is assigned to one of
+4-6 topics, and each topic is explained from exactly its sections. The goal
+is then just the roadmap's label. The approval screen shows which sections
+each topic teaches. Topics whose notes have no Python code get an example in
+words and concept questions only.
+
+Without uploads, the sample notes are used and the roadmap comes from the
+goal alone. Notes are fixed once the session starts; to change them, use
 **Start over**.
 
 ## Limitations
@@ -47,9 +53,12 @@ the goal alone. Notes are fixed once the session starts; to change them, use
   it, so the limits are kept small for now. **Planned:** host a bigger model
   with a longer context on Kaggle, then raise these limits (see
   [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#limits-to-know)).
-- **The planner sees an outline of your notes, not the full text**: each
-  file's headings and opening lines, about 6,000 characters in all.
-- **The Explainer reads one file per topic**, for the same context reason.
+- **The planner sees each section's heading and first lines**, not the full
+  text (about 6,000 characters in all).
+- **A topic's notes are cut at 12,000 characters** when the Explainer reads
+  them, for the same context reason; the explanation then says so.
+- **"Make a new one" may give a very similar roadmap** from the same notes
+  (the planner runs at a low temperature).
 - **Uploads last for one browser session.** They are not saved between visits;
   a refresh or an app restart loses them.
 - **Only `.md` and `.txt`.** PDFs and Word files aren't supported.

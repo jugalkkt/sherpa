@@ -3,6 +3,10 @@
 This is the project's retrieval ("agentic RAG" without vectors): the model
 calls MCP-backed tools to list, search and read the notes, then explains.
 
+When the topic came from uploaded notes (it has `sources`), there is nothing
+to find: the node puts those sections into the prompt itself, and the model
+gets no read_file tool (a whole file on top would overflow the context).
+
 The MCP server functions are imported directly and called in-process.
 Production would run the servers as separate processes and load their tools
 with langchain-mcp-adapters' MultiServerMCPClient; only this wrapping changes.
@@ -21,6 +25,7 @@ from graph.state import Topic, get_current_topic
 from llm import build_llm, describe_llm_error
 from mcp_servers.filesystem_server import list_study_files, read_study_file, search_notes, use_notes_dir
 from mcp_servers.memory_server import memory_get, memory_set
+from notes_sections import MAX_MATERIAL_CHARS, topic_material
 
 MAX_ITERATIONS = 8
 EXPLAINED_TOPICS_KEY = "explained_topics"
@@ -65,6 +70,9 @@ def tool_memory_set(session_id: str, key: str, value: str) -> str:
 
 EXPLAINER_TOOLS = [tool_list_files, tool_read_file, tool_search_notes, tool_memory_get, tool_memory_set]
 TOOL_MAP = {t.name: t for t in EXPLAINER_TOOLS}
+# Topics from uploaded notes: the material is already in the prompt.
+NOTES_TOOLS = [tool_search_notes, tool_memory_get, tool_memory_set]
+NOTES_TOOL_MAP = {t.name: t for t in NOTES_TOOLS}
 
 
 EXPLAINER_SYSTEM_PROMPT = f"""\
@@ -87,16 +95,49 @@ The explanation must have these four parts, with these headings:
 """
 
 
+NOTES_EXPLAINER_PROMPT = f"""\
+You are a patient tutor. Explain ONE topic to the learner using ONLY the
+learner's own notes for it, which are given in the message. Do not add facts
+the notes don't contain; if the notes are brief, keep the explanation brief.
+
+You may use these tools before answering:
+- memory_get with the session id and key "{EXPLAINED_TOPICS_KEY}": topics already
+  explained. Build on them; don't repeat them.
+- search_notes: where a term appears elsewhere in the learner's notes.
+Then write the explanation as your final reply, with no further tool calls.
+
+The explanation must have these four parts, with these headings:
+**Analogy**: a real-world analogy in 1-2 sentences.
+**Core concept**: what the notes say, as they put it. Cover EVERY section
+given, in order, in 1-2 sentences each, naming each section's idea.
+**Example**: {{example}}
+**Common gotcha**: one mistake learners make, and how to avoid it.
+"""
+EXAMPLE_FROM_CODE = "a short code example taken from the notes, in a fenced code block."
+EXAMPLE_IN_WORDS = "a concrete worked example in words, based on the notes. No code."
+TRUNCATED_NOTE = ("\n\n_Note: this topic's notes were longer than the model can read at once "
+                  f"({MAX_MATERIAL_CHARS:,} characters), so the end was left out._")
+
+
 def build_explainer_llm() -> Runnable:
     return build_llm(temperature=0.3).bind_tools(EXPLAINER_TOOLS)
 
 
-def execute_tool_call(tool_call: dict) -> str:
-    """Run one tool call from the model and return its result as text. Never raises."""
+def build_notes_explainer_llm() -> Runnable:
+    return build_llm(temperature=0.3).bind_tools(NOTES_TOOLS)
+
+
+def execute_tool_call(tool_call: dict, tool_map: dict | None = None) -> str:
+    """Run one tool call from the model and return its result as text. Never raises.
+
+    tool_map: the tools this model was offered (default: all of them); any
+    other name is refused, even if the model makes one up.
+    """
+    tool_map = TOOL_MAP if tool_map is None else tool_map
     name = tool_call.get("name", "")
-    tool_fn = TOOL_MAP.get(name)
+    tool_fn = tool_map.get(name)
     if tool_fn is None:
-        return f"Error: unknown tool '{name}'. Available tools: {', '.join(TOOL_MAP)}"
+        return f"Error: unknown tool '{name}'. Available tools: {', '.join(tool_map)}"
     try:
         result = tool_fn.invoke(tool_call.get("args") or {})
     except Exception as exc:
@@ -125,23 +166,31 @@ def explainer_node(state: dict) -> dict:
     topic = get_current_topic(state)
     if topic is None:
         return {"error": "Explainer: no current topic to explain."}
+    session_id = state.get("session_id", "")
     uploaded = state.get("study_materials_path") or ""
     # The learner's uploaded notes, if any, replace NOTES_PATH for this call only.
     with use_notes_dir(uploaded) if uploaded else nullcontext():
-        return _explain(topic, state.get("session_id", ""))
+        if uploaded and topic.sources:
+            material, truncated, has_code = topic_material(uploaded, topic.sources)
+            if material:
+                prompt = NOTES_EXPLAINER_PROMPT.format(example=EXAMPLE_FROM_CODE if has_code else EXAMPLE_IN_WORDS)
+                if truncated:
+                    print(f"[Explainer] This topic's notes were cut at {MAX_MATERIAL_CHARS:,} characters.")
+                return _explain(topic, session_id, prompt, build_notes_explainer_llm(), NOTES_TOOL_MAP,
+                                material=material, footer=TRUNCATED_NOTE if truncated else "")
+            print("[Explainer] This topic's sections weren't found; searching the notes instead.")
+        return _explain(topic, session_id, EXPLAINER_SYSTEM_PROMPT, build_explainer_llm(), TOOL_MAP)
 
 
-def _explain(topic: Topic, session_id: str) -> dict:
+def _explain(topic: Topic, session_id: str, system_prompt: str, llm: Runnable, tool_map: dict,
+             material: str = "", footer: str = "") -> dict:
     print(f"\n[Explainer] Topic: {topic.title}")
-    llm = build_explainer_llm()
-    messages: list[BaseMessage] = [
-        SystemMessage(content=EXPLAINER_SYSTEM_PROMPT),
-        HumanMessage(content=(
-            f"Topic: {topic.title}\n"
-            f"Description: {topic.description}\n"
-            f"Session id (for memory tools): {session_id}"
-        )),
-    ]
+    request = (f"Topic: {topic.title}\n"
+               f"Description: {topic.description}\n"
+               f"Session id (for memory tools): {session_id}")
+    if material:
+        request += f"\n\nYour notes for this topic:\n\n{material}"
+    messages: list[BaseMessage] = [SystemMessage(content=system_prompt), HumanMessage(content=request)]
 
     for i in range(1, MAX_ITERATIONS + 1):
         print(f"[Explainer] LLM call {i}/{MAX_ITERATIONS}...")
@@ -154,13 +203,15 @@ def _explain(topic: Topic, session_id: str) -> dict:
         messages.append(response)
 
         if not response.tool_calls:
+            if footer:
+                response.content = f"{response.content}{footer}"
             _record_explained(session_id, topic.title)
             print(f"\n{response.content}\n")
             return {"messages": messages, "error": None}
 
         for call in response.tool_calls:
             print(f"  → {call['name']}({json.dumps(call.get('args') or {})})")
-            result = execute_tool_call(call)
+            result = execute_tool_call(call, tool_map)
             print(f"    ← {result[:100]}{'...' if len(result) > 100 else ''}")
             # The id must match the call, or the model can't pair result with request.
             messages.append(ToolMessage(content=result, tool_call_id=call["id"], name=call["name"]))

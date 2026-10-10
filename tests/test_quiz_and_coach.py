@@ -1,5 +1,6 @@
 import copy
 import json
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -386,7 +387,7 @@ def test_dedupe_keeps_order_and_ignores_case_and_blanks():
 
 
 def test_run_quiz_flow(monkeypatch, answers, capsys):
-    monkeypatch.setattr(quiz, "generate_questions", lambda t, e, n=3: [
+    monkeypatch.setattr(quiz, "generate_questions", lambda t, e, n=3, allow_code=True: [
         {"question": "Q1", "expected_answer": "A1", "difficulty": "easy"},
         {"question": "Q2", "expected_answer": "A2", "difficulty": "hard"},
     ])
@@ -410,7 +411,7 @@ def test_run_quiz_flow(monkeypatch, answers, capsys):
 
 
 def test_run_quiz_shows_code_and_grades_with_it(monkeypatch, answers, capsys):
-    monkeypatch.setattr(quiz, "generate_questions", lambda t, e, n=3: [
+    monkeypatch.setattr(quiz, "generate_questions", lambda t, e, n=3, allow_code=True: [
         {"question": "What does this print?", "code": "a = [1]\nb = a\nb.append(2)\nprint(a)",
          "expected_answer": "[1, 2]", "difficulty": "easy"},
     ])
@@ -458,7 +459,7 @@ def test_quiz_node_accumulates_results_and_dedupes_weak_areas(sample_state, monk
                         messages=[AIMessage(content="explained")])
     seen = {}
 
-    def fake_run_quiz(title, explanation):
+    def fake_run_quiz(title, explanation, allow_code=True):
         seen.update(title=title, explanation=explanation)
         return result(0.4, ["Nonlocal", "late binding"])
     monkeypatch.setattr(quiz, "run_quiz", fake_run_quiz)
@@ -747,3 +748,40 @@ def test_a_failure_on_the_second_attempt_keeps_the_first_questions(monkeypatch):
 def test_unusable_first_attempt_is_not_retried(monkeypatch):
     llm = seq(monkeypatch, "not json at all", {"questions": [concept("never asked")]})
     assert "own words" in generate_questions("x", "x")[0]["question"] and llm.calls == 1
+
+
+# --- notes without code: concept questions only ------------------------------------------------
+
+def test_concept_only_mode_drops_code_questions(monkeypatch):
+    llm = MagicMock()
+    llm.invoke.return_value = AIMessage(content=json.dumps({"questions": [
+        {"question": "What does this print?", "code": "print(1)", "expected_answer": "", "difficulty": "easy"},
+        {"question": "Why do agents need memory?", "code": "", "expected_answer": "To keep state.", "difficulty": "medium"},
+    ]}))
+    monkeypatch.setattr(quiz, "build_llm", lambda **kw: llm)
+    questions = quiz.generate_questions("Agents", "explanation", n=1, allow_code=False)
+    assert [q["question"] for q in questions] == ["Why do agents need memory?"]
+    system = llm.invoke.call_args.args[0][0].content
+    assert "All questions are CONCEPT questions" in system and "CODE questions" not in system
+
+
+def test_code_mode_prompt_is_unchanged(monkeypatch):
+    llm = MagicMock()
+    llm.invoke.return_value = AIMessage(content=json.dumps({"questions": []}))
+    monkeypatch.setattr(quiz, "build_llm", lambda **kw: llm)
+    quiz.generate_questions("Closures", "explanation", n=1)
+    assert llm.invoke.call_args.args[0][0].content == quiz.GENERATION_PROMPT.format(n=3)
+
+
+@pytest.mark.parametrize("sources, file_text, expected", [
+    ([], "## A\nno code\n", True),                                   # roadmap from the goal: as before
+    (["n.md#1"], "## A\nno code here\n", False),
+    (["n.md#1"], "## A\n```python\nprint(1)\n```\n", True),
+    (["n.md#2"], "## A\n```python\nprint(1)\n```\n## B\ntext\n", False),  # only this topic's sections count
+])
+def test_topic_allows_code(sample_state, tmp_path, sources, file_text, expected):
+    (tmp_path / "n.md").write_text(file_text)
+    roadmap = sample_state["roadmap"]
+    roadmap.topics[0].sources = sources
+    state = {**sample_state, "roadmap": roadmap, "study_materials_path": str(tmp_path)}
+    assert quiz.topic_allows_code(state) is expected

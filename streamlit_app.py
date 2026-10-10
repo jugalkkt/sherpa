@@ -57,11 +57,13 @@ from agents.quiz_generator import (  # noqa: E402
     generate_questions,
     grade_answer,
     quiz_score,
+    topic_allows_code,
     weak_areas_of,
 )
 from graph.state import QuizQuestion, QuizResult, StudyRoadmap, get_current_topic, initial_state  # noqa: E402
 from graph.workflow import build_graph  # noqa: E402
 from hosting.kaggle_server import idle_minutes, server_status, start_server  # noqa: E402
+from notes_sections import load_sections  # noqa: E402
 from notes_upload import MAX_FILE_BYTES, MAX_FILES, remove_uploads, save_uploads, validate_uploads  # noqa: E402
 from observability.langfuse_setup import flush_langfuse, get_langfuse_config  # noqa: E402
 
@@ -161,7 +163,7 @@ def advance(result: dict | None = None) -> None:
             S.topic, S.explanation = topic, extract_explanation(values)
             S.explainer_error = values.get("error")
             with st.spinner("Writing quiz questions..."):
-                S.questions = generate_questions(topic.title, S.explanation)
+                S.questions = generate_questions(topic.title, S.explanation, allow_code=topic_allows_code(values))
             S.q_index, S.graded, S.weak, S.feedback = 0, [], [], None
             S.screen = "learn"
             return
@@ -236,9 +238,14 @@ def finish_quiz() -> None:
 
 def show_roadmap(roadmap: StudyRoadmap) -> None:
     st.markdown(f"**{roadmap.goal}** · {roadmap.total_weeks} week(s), {roadmap.weekly_hours} h/week")
+    labels = {}
+    if S.get("notes_dir") and any(t.sources for t in roadmap.topics):
+        st.caption("Built from your notes: each topic lists the sections it teaches.")
+        labels = {s.id: s.label for s in load_sections(S.notes_dir)}
     for i, t in enumerate(roadmap.topics, 1):
         needs = f"  \n*needs: {', '.join(t.prerequisites)}*" if t.prerequisites else ""
-        st.markdown(f"{i}. **{t.title}** ({t.estimated_minutes} min): {t.description}{needs}")
+        sources = f"  \n*from: {', '.join(labels.get(sid, sid) for sid in t.sources)}*" if t.sources else ""
+        st.markdown(f"{i}. **{t.title}** ({t.estimated_minutes} min): {t.description}{needs}{sources}")
 
 
 def screen_goal() -> None:

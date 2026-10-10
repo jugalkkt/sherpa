@@ -502,10 +502,39 @@ They replace the sample notes for that browser session only.
   concurrent Streamlit sessions can't see each other's notes.
 - `.txt` uploads are saved as `.md`, so the notes server keeps its
   Markdown-only rule (tested for security) unchanged.
-- The Planner gets an outline (`notes_digest`: per file, headings outside
-  code blocks, then opening text; 6,000 characters split evenly across files)
-  and the rule "build topics from what the notes cover". It does this only
-  when there are uploads; with the sample notes it plans from the goal as
-  before.
-- The Explainer prompt now says to read the ONE most relevant file (was
-  "file(s)"): two 15 KB files would overflow the context.
+- The Explainer prompt (no uploads) says to read the ONE most relevant file
+  (was "file(s)"): two 15 KB files would overflow the context.
+
+### Roadmap built only from the uploaded notes (enforced, not requested)
+
+First version: the Planner got an outline of the notes and was *asked* to
+stay within it, and the Explainer then had to find the material again with
+keyword search, which missed whenever a topic's title used other words than
+the notes. Live, an unrelated goal produced an invented roadmap and
+explanations from general knowledge. Now, with uploads:
+
+- `notes_sections.py` splits the notes at `#` / `##` headings outside code
+  blocks; ids like `closures.md#3`, stable because uploads are locked.
+- The Planner groups section ids into topics, and the goal is not sent (it
+  is only the roadmap's label). The JSON schema allows only the real ids
+  (an enum) and 4-6 topics (`minItems`/`maxItems`; added after a live run
+  where the model made one topic per file). In code, `parse_notes_roadmap`
+  drops unknown and repeated ids, gives every left-out section to the topic
+  of its nearest neighbour (previous section, else next), and splits the
+  biggest topic if there are still too few ("Agents (1 of 2)"). If the
+  output is unusable, `fallback_notes_roadmap` splits the sections in order.
+- `Topic.sources` holds the ids. The Explainer gets that text in the prompt
+  (cut at 12,000 characters, with a note in the explanation), and has no
+  `read_file` tool in this mode: a whole file on top would overflow the 8K
+  context. Its prompt asks it to cover every section, 1-2 sentences each
+  (live, "the idea in 2-3 sentences" made it skip sections of a 4-section
+  topic).
+- Notes with no Python code: the Example is in words and the quiz asks
+  concept questions only (`topic_allows_code`); code questions the model
+  writes anyway are dropped.
+
+Live check (qwen2.5:7b, a no-code agentic-AI note + `closures.md`, goal
+"Learn quantum chemistry"): 3 of 3 runs gave the same 4 topics with the
+model's own titles, all 14 sections covered once; explanations followed the
+notes section by section; the agentic topics got concept questions only, the
+closures topic 3 verified code questions.

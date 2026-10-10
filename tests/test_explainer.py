@@ -213,3 +213,64 @@ def test_uploaded_notes_replace_the_default_folder(sample_state, use_llm, tmp_pa
     assert json.loads(out["messages"][3].content) == ["sorting.md"]
     assert "closures.md" in tool_list_files.invoke({})  # only for that call
     assert len(llm.calls) == 2
+
+
+# --- topics from uploaded notes (material given in the prompt) -------------------------------
+
+@pytest.fixture
+def notes_state(sample_state, tmp_path):
+    (tmp_path / "agents.md").write_text("## Tools\nAn agent calls tools to act.\n## Memory\nMemory keeps state.\n")
+    roadmap = sample_state["roadmap"]
+    roadmap.topics[0].sources = ["agents.md#1"]
+    return {**sample_state, "roadmap": roadmap, "study_materials_path": str(tmp_path)}
+
+
+@pytest.fixture
+def use_notes_llm(monkeypatch):
+    def install(llm):
+        monkeypatch.setattr(explainer, "build_notes_explainer_llm", lambda: llm)
+        monkeypatch.setattr(explainer, "build_explainer_llm", lambda: pytest.fail("search-based path used"))
+        return llm
+    return install
+
+
+def test_notes_topic_gets_its_sections_in_the_prompt(notes_state, use_notes_llm):
+    llm = use_notes_llm(ScriptedLLM(AIMessage(content="**Analogy**: ...")))
+    out = explainer_node(notes_state)
+    assert out["error"] is None
+    system, human = llm.calls[0][:2]
+    assert "ONLY" in system.content and "No code." in system.content  # notes without code: example in words
+    assert "Your notes for this topic" in human.content and "An agent calls tools" in human.content
+    assert "Memory keeps state" not in human.content  # only this topic's section
+
+
+def test_notes_topic_with_code_asks_for_a_code_example(notes_state, use_notes_llm, tmp_path):
+    (tmp_path / "agents.md").write_text("## Tools\n```python\nprint('tool')\n```\n")
+    llm = use_notes_llm(ScriptedLLM(AIMessage(content="done")))
+    explainer_node(notes_state)
+    assert "code example taken from the notes" in llm.calls[0][0].content
+
+
+def test_notes_mode_does_not_offer_or_run_read_file(notes_state, use_notes_llm):
+    assert set(explainer.NOTES_TOOL_MAP) == {"search_notes", "memory_get", "memory_set"}
+    use_notes_llm(ScriptedLLM(
+        AIMessage(content="", tool_calls=[call("read_file", {"filename": "agents.md"})]),
+        AIMessage(content="done"),
+    ))
+    out = explainer_node(notes_state)
+    assert out["messages"][3].content.startswith("Error: unknown tool 'read_file'")
+
+
+def test_cut_material_adds_a_note_to_the_explanation(notes_state, use_notes_llm, monkeypatch):
+    real = explainer.topic_material
+    monkeypatch.setattr(explainer, "topic_material", lambda base, ids: real(base, ids, max_chars=10))
+    use_notes_llm(ScriptedLLM(AIMessage(content="Explanation.")))
+    out = explainer_node(notes_state)
+    assert out["messages"][-1].content.startswith("Explanation.\n\n_Note: this topic's notes were longer")
+
+
+def test_missing_sections_fall_back_to_searching(notes_state, use_llm):
+    roadmap = notes_state["roadmap"]
+    roadmap.topics[0].sources = ["gone.md#1"]
+    use_llm(ScriptedLLM(AIMessage(content="done")))
+    assert explainer_node({**notes_state, "roadmap": roadmap})["error"] is None

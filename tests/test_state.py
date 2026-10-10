@@ -198,3 +198,9 @@ def test_helpers_survive_strict_checkpoint_round_trip(sample_state):
     assert get_current_topic(back).title == "Closures Explained"
     assert get_latest_quiz_result(back).passed()
     assert not session_is_complete(back)
+
+
+def test_topic_sources_round_trip_and_old_dicts_still_load():
+    t = Topic("T", "d", 30, sources=["a.md#1", "a.md#2"])
+    assert Topic.from_dict(t.to_dict()) == t
+    assert Topic.from_dict({"title": "T", "description": "d", "estimated_minutes": 30}).sources == []

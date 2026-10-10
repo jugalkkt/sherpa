@@ -18,6 +18,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from code_runner import run_snippet
 from graph.state import QuizQuestion, QuizResult, get_current_topic
 from llm import build_llm, describe_llm_error, invoke_with_retry
+from notes_sections import load_sections
 
 NO_ANSWER = "(no answer provided)"
 EXTRA_QUESTIONS = 2  # ask for more than needed: code questions that fail verification are dropped
@@ -56,6 +57,16 @@ Two kinds of question. Include at least one of each:
 
 Respond with a single JSON object and nothing else:
 {{"questions": [{{"question": "...", "code": "...", "expected_answer": "...", "difficulty": "easy|medium|hard"}}]}}
+"""
+
+# For topics whose notes contain no code: concept questions only.
+CONCEPT_ONLY_PROMPT = GENERATION_PROMPT.split("Two kinds of question.")[0] + """\
+All questions are CONCEPT questions: about an idea, a rule, a comparison or a
+mistake, answerable in words. "code" is always "" and the question text
+contains no code.
+
+Respond with a single JSON object and nothing else:
+{{"questions": [{{"question": "...", "code": "", "expected_answer": "...", "difficulty": "easy|medium|hard"}}]}}
 """
 
 # Ollama structured output: generation is constrained to exactly this shape.
@@ -220,7 +231,8 @@ def full_question(q: dict) -> str:
     return f"{q['question']}\n\n```python\n{code}\n```" if code else q["question"]
 
 
-def _generate_batch(topic: str, explanation: str, ask: int, need: int, seen: set[str]) -> list[dict] | None:
+def _generate_batch(topic: str, explanation: str, ask: int, need: int, seen: set[str],
+                    allow_code: bool = True) -> list[dict] | None:
     """One model call, filtered and verified. At most `need` new questions come back.
 
     `seen` holds the key (the code, else the question text) of every question already
@@ -231,7 +243,7 @@ def _generate_batch(topic: str, explanation: str, ask: int, need: int, seen: set
     llm = build_llm(temperature=0.4, json_schema=QUESTIONS_SCHEMA)
     try:
         response = invoke_with_retry(llm, [
-            SystemMessage(content=GENERATION_PROMPT.format(n=ask)),
+            SystemMessage(content=(GENERATION_PROMPT if allow_code else CONCEPT_ONLY_PROMPT).format(n=ask)),
             HumanMessage(content=f"Topic: {topic}\n\nExplanation:\n{explanation[:MAX_EXPLANATION_CHARS]}"),
         ])
     except Exception as exc:
@@ -249,6 +261,9 @@ def _generate_batch(topic: str, explanation: str, ask: int, need: int, seen: set
             continue
         question, code = _split_code(str(q["question"]).strip(), str(q.get("code") or ""))
         code = strip_comments(code)
+        if code and not allow_code:
+            print("[Quiz] Dropped a code question: this topic's notes have no code.")
+            continue
         key = code or question
         if key in seen:
             continue
@@ -278,18 +293,20 @@ def _generate_batch(topic: str, explanation: str, ask: int, need: int, seen: set
     return questions
 
 
-def generate_questions(topic: str, explanation: str, n: int = 3) -> list[dict]:
+def generate_questions(topic: str, explanation: str, n: int = 3, allow_code: bool = True) -> list[dict]:
     """Ask the LLM for n self-contained questions: {question, code, expected_answer, difficulty, verified}.
 
     Code questions are verified by running the code (`verified` is the real output); the
     ones that can't be verified are dropped, and if that leaves too few the model is asked
     once more for the shortfall. Falls back to one generic question if nothing usable.
+    allow_code=False (notes without code): concept questions only.
     """
     questions: list[dict] = []
     seen: set[str] = set()
     for _ in range(MAX_ATTEMPTS):
         need = n - len(questions)
-        batch = _generate_batch(topic, explanation, ask=need + EXTRA_QUESTIONS, need=need, seen=seen)
+        batch = _generate_batch(topic, explanation, ask=need + EXTRA_QUESTIONS, need=need, seen=seen,
+                                allow_code=allow_code)
         if batch is None:
             break  # the model is failing or unusable: asking again won't help
         questions.extend(batch)
@@ -361,9 +378,19 @@ def weak_areas_of(questions: list[QuizQuestion], missing_concepts: list[str]) ->
     return dedupe([m for q, m in zip(questions, missing_concepts) if not q.disputed])
 
 
-def run_quiz(topic: str, explanation: str) -> QuizResult:
+def topic_allows_code(state: dict) -> bool:
+    """Code questions are allowed unless the topic came from uploaded notes that have no Python code."""
+    topic = get_current_topic(state)
+    uploaded = state.get("study_materials_path") or ""
+    if topic is None or not topic.sources or not uploaded:
+        return True
+    wanted = set(topic.sources)
+    return any(s.has_python_code for s in load_sections(uploaded) if s.id in wanted)
+
+
+def run_quiz(topic: str, explanation: str, allow_code: bool = True) -> QuizResult:
     """Terminal quiz: ask each question with input(), grade it, print feedback."""
-    questions = generate_questions(topic, explanation)
+    questions = generate_questions(topic, explanation, allow_code=allow_code)
     print(f"\n📝 Quiz: {topic} ({len(questions)} question{'s' if len(questions) != 1 else ''})")
 
     graded: list[QuizQuestion] = []
@@ -420,7 +447,7 @@ def quiz_generator_node(state: dict) -> dict:
     if state.get("error"):
         print(f"[Quiz] Explainer had a problem ({state['error']}); quizzing on the topic description.")
 
-    result = run_quiz(topic.title, extract_explanation(state))
+    result = run_quiz(topic.title, extract_explanation(state), allow_code=topic_allows_code(state))
     print(f"\n[Quiz] Score: {result.score:.0%}")
 
     return {

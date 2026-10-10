@@ -173,7 +173,7 @@ def mocked_llms(monkeypatch):
     explainer_llm = MagicMock()
     explainer_llm.invoke.return_value = AIMessage(content="An explanation.")
     monkeypatch.setattr(explainer, "build_explainer_llm", lambda: explainer_llm)
-    monkeypatch.setattr(quiz, "generate_questions", lambda topic, explanation, n=3: QUESTIONS)
+    monkeypatch.setattr(quiz, "generate_questions", lambda topic, explanation, n=3, allow_code=True: QUESTIONS)
     monkeypatch.setattr(quiz, "grade_answer", fake_grade)
     monkeypatch.setattr(coach, "get_coaching_message",
                         lambda topic, score, weak: {"summary": f"Coached {topic}", "encouragement": ""})

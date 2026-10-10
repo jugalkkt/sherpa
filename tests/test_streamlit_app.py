@@ -107,7 +107,7 @@ def test_reject_roadmap_makes_a_new_one(app, mocked_llms):
 
 def test_code_is_shown_with_the_question(app, mocked_llms, monkeypatch):
     import agents.quiz_generator as quiz
-    monkeypatch.setattr(quiz, "generate_questions", lambda t, e, n=3: [
+    monkeypatch.setattr(quiz, "generate_questions", lambda t, e, n=3, allow_code=True: [
         {"question": "What does this print?", "code": "print(1 + 1)", "expected_answer": "2", "difficulty": "easy"}])
     at = button(app(), "Start session").click().run()
     at = button(at, "Looks good").click().run()
@@ -156,7 +156,7 @@ def button_click(at, label):
 
 def test_expected_answer_is_shown_after_grading(app, mocked_llms, monkeypatch):
     import agents.quiz_generator as quiz
-    monkeypatch.setattr(quiz, "generate_questions", lambda t, e, n=3: [
+    monkeypatch.setattr(quiz, "generate_questions", lambda t, e, n=3, allow_code=True: [
         {"question": "What does this print?", "code": "print(1)", "difficulty": "easy", "verified": "1",
          "expected_answer": "Verified output (from running the code):\n1\n\nWhy: it prints one."}])
     at = reach_first_graded_question(app)
@@ -223,3 +223,27 @@ def test_real_environment_wins_over_secrets(app, monkeypatch):
     monkeypatch.setenv("OLLAMA_MODEL", "from-env")
     app()
     assert os.environ["OLLAMA_MODEL"] == "from-env"
+
+
+def test_roadmap_from_notes_shows_each_topics_sections(app, tmp_path):
+    from graph.state import StudyRoadmap, Topic
+
+    app()  # builds the cached graph on the temp DB, as the fixture intends
+    (tmp_path / "agents.md").write_text("# Agents\nAn agent loops.\n## Tools\nTools act.\n")
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.session_state["screen"] = "approve"
+    at.session_state["notes_dir"] = str(tmp_path)
+    at.session_state["roadmap"] = StudyRoadmap(goal="label", total_weeks=1, topics=[
+        Topic("Agent basics", "What an agent is.", 30, sources=["agents.md#1", "agents.md#2"]),
+    ])
+    at.run()
+    text = "\n".join(m.value for m in at.markdown)
+    assert "from: agents.md › Agents, agents.md › Tools" in text
+    assert any("Built from your notes" in c.value for c in at.caption)
+
+
+def test_roadmap_from_the_goal_shows_no_sources(app, mocked_llms):
+    at = app()
+    at.button[0].click().run()  # Start session
+    assert not any("from:" in m.value for m in at.markdown)
+    assert not any("Built from your notes" in c.value for c in at.caption)
