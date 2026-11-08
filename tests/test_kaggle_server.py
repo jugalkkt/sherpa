@@ -405,3 +405,15 @@ def test_overlapping_calls_do_not_leave_stdout_captured(fresh_kaggle_import, mon
     [t.start() for t in threads]
     [t.join(10) for t in threads]
     assert sys.stdout is original
+
+
+def test_requirements_list_six_because_kaggle_imports_it_without_declaring_it():
+    """kaggle 2.2.4's kaggle/models/upload_file.py does `import six`, but its metadata doesn't list it.
+    It used to arrive through python-dateutil; python-dateutil 4 dropped it, so a fresh Streamlit Cloud
+    install had no `six` and "Start model server" failed with "No module named 'six'"."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    for name in ("requirements.txt", "deploy/streamlit/requirements.txt"):
+        pins = [line.split("#")[0].strip() for line in (root / name).read_text().splitlines()]
+        assert any(pin.startswith("six==") for pin in pins), f"{name} must pin six"
