@@ -29,6 +29,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -101,6 +102,29 @@ def kernel_metadata(kernel_slug: str, dataset_slug: str) -> dict:
     }
 
 
+# The page and the sidebar's 15-second status refresh run on different threads, and
+# both end up here. One at a time: redirect_stdout changes the whole process's
+# sys.stdout (two overlapping redirects can leave it pointing at the capture buffer
+# for good), and two threads must not import the kaggle package at the same time.
+_KAGGLE_LOCK = threading.Lock()
+
+
+def _forget_orphaned_kaggle_modules() -> None:
+    """Drop what a failed `import kaggle` leaves behind, so the next try starts clean.
+
+    The library is circular on purpose: kaggle/__init__.py imports kaggle.api.kaggle_api_extended,
+    which does `import kaggle`. That only works if `kaggle` is imported FIRST. When the first
+    import fails part way (any dependency hiccup), Python removes `kaggle` but leaves the
+    half-loaded `kaggle.api` package in sys.modules. Every later import then skips loading
+    `kaggle` first and dies with "cannot import name 'KaggleApi' from partially initialized
+    module", on every call, until the process restarts, and that hides the real first error.
+    """
+    if "kaggle" in sys.modules:
+        return  # imported fine, nothing to clean
+    for name in [m for m in sys.modules if m.startswith("kaggle.")]:
+        del sys.modules[name]
+
+
 def _kaggle_api():
     """An authenticated Kaggle client. Raises RuntimeError (never SystemExit) if login fails.
 
@@ -110,15 +134,20 @@ def _kaggle_api():
     their output captured, and SystemExit becomes an ordinary error.
     """
     captured = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-            from kaggle.api.kaggle_api_extended import KaggleApi
+    with _KAGGLE_LOCK:
+        _forget_orphaned_kaggle_modules()
+        try:
+            with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
+                from kaggle.api.kaggle_api_extended import KaggleApi
 
-            api = KaggleApi()
-            api.authenticate()
-    except SystemExit:
-        raise RuntimeError("Kaggle login failed. Set KAGGLE_API_TOKEN (kaggle.com > Settings > API) "
-                           "in the app's secrets or .env.") from None
+                api = KaggleApi()
+                api.authenticate()
+        except SystemExit:
+            raise RuntimeError("Kaggle login failed. Set KAGGLE_API_TOKEN (kaggle.com > Settings > API) "
+                               "in the app's secrets or .env.") from None
+        except Exception:
+            _forget_orphaned_kaggle_modules()  # the next call retries cleanly and reports the real error
+            raise
     return api
 
 

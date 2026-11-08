@@ -295,3 +295,113 @@ def test_upload_secrets_without_a_token_raises_a_normal_error(settings, monkeypa
     exit_on_authenticate(monkeypatch)
     with pytest.raises(RuntimeError, match="KAGGLE_API_TOKEN"):
         upload_secrets()
+
+
+# --- a failed first `import kaggle` must not poison the process (seen on Streamlit Cloud) -----------------------
+
+@pytest.fixture
+def fresh_kaggle_import(monkeypatch, tmp_path):
+    """Start with no kaggle modules loaded and no credentials, and put things back afterwards."""
+    import sys
+
+    def kaggle_modules():
+        return {n: m for n, m in sys.modules.items() if n == "kaggle" or n.startswith("kaggle.")}
+
+    saved = kaggle_modules()
+    for name in saved:
+        del sys.modules[name]
+    for var in ("KAGGLE_API_TOKEN", "KAGGLE_USERNAME", "KAGGLE_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))  # no ~/.kaggle
+    yield sys
+    for name in kaggle_modules():
+        del sys.modules[name]
+    sys.modules.update(saved)
+
+
+# Part of the kaggle package, so the fixture's clean slate makes it load (and fail) again in every test.
+FAILING_MODULE = "kaggle.models.kaggle_models_extended"
+
+
+def fail_import_once(monkeypatch, module_name):
+    import importlib.abc
+    import sys
+
+    class FailOnce(importlib.abc.MetaPathFinder):
+        left = 1
+
+        def find_spec(self, name, path, target=None):
+            if name == module_name and FailOnce.left:
+                FailOnce.left -= 1
+                raise ImportError(f"simulated first-time failure importing {name}")
+
+    finder = FailOnce()
+    sys.meta_path.insert(0, finder)
+    monkeypatch.setattr(sys, "meta_path", sys.meta_path)  # restored (and the finder dropped) on teardown
+
+
+def test_a_failed_first_import_reports_the_real_error_then_recovers(fresh_kaggle_import, monkeypatch):
+    import hosting.kaggle_server as ks
+
+    fail_import_once(monkeypatch, FAILING_MODULE)
+    with pytest.raises(ImportError, match="simulated first-time failure"):
+        ks._kaggle_api()
+    # Before the fix, every later call died with "cannot import name 'KaggleApi' from partially
+    # initialized module", for as long as the process lived. Now the import is simply retried.
+    with pytest.raises(RuntimeError, match="Kaggle login failed"):  # got past the import; no token here
+        ks._kaggle_api()
+    with pytest.raises(RuntimeError, match="Kaggle login failed"):
+        ks._kaggle_api()
+
+
+def test_server_status_shows_the_real_import_error_not_a_circular_import_one(
+        fresh_kaggle_import, settings, unreachable, monkeypatch):
+    fail_import_once(monkeypatch, FAILING_MODULE)
+    first = server_status()
+    assert first.state == "error" and "simulated first-time failure" in first.detail
+    second = server_status()  # the sidebar refreshes every 15 s: this is what the user would see next
+    assert "circular" not in second.detail and "partially initialized" not in second.detail
+
+
+def test_leftovers_are_only_cleaned_when_the_kaggle_package_itself_is_missing(fresh_kaggle_import):
+    import hosting.kaggle_server as ks
+
+    sys = fresh_kaggle_import
+    sys.modules["kaggle.api"] = object()          # orphan: `kaggle` itself is not loaded
+    ks._forget_orphaned_kaggle_modules()
+    assert "kaggle.api" not in sys.modules
+    sys.modules["kaggle"], sys.modules["kaggle.api"] = object(), object()  # a healthy import
+    ks._forget_orphaned_kaggle_modules()
+    assert "kaggle" in sys.modules and "kaggle.api" in sys.modules
+
+
+def test_overlapping_calls_do_not_leave_stdout_captured(fresh_kaggle_import, monkeypatch):
+    """The page and the 15-second status refresh run on different threads. Two overlapping
+    redirect_stdout blocks used to leave sys.stdout pointing at the capture buffer for good."""
+    import sys
+    import threading
+    import time
+
+    import hosting.kaggle_server as ks
+
+    with pytest.raises(RuntimeError):
+        ks._kaggle_api()  # loads the library (no token)
+    from kaggle.api.kaggle_api_extended import KaggleApi
+
+    def slow_authenticate(self):
+        time.sleep(0.2)
+        raise SystemExit(1)
+    monkeypatch.setattr(KaggleApi, "authenticate", slow_authenticate)
+
+    original = sys.stdout
+    barrier = threading.Barrier(2)
+
+    def call():
+        barrier.wait()
+        with pytest.raises(RuntimeError):
+            ks._kaggle_api()
+
+    threads = [threading.Thread(target=call) for _ in range(2)]
+    [t.start() for t in threads]
+    [t.join(10) for t in threads]
+    assert sys.stdout is original
